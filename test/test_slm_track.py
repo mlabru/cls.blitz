@@ -149,3 +149,75 @@ def test_load_tracks_recreates_missing_kalman_state(tmp_path):
     assert "abc12345" in loaded_kalman
     lat, lng, _, _ = loaded_kalman["abc12345"].predict_position(0.0)
     assert (lat, lng) == (1.0, 2.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# expiração por tempo e associação contra a posição prevista (2026.nov)
+
+def _track(track_id, t_end, active=True):
+    return sst.TStormTrack(id=track_id, active=active,
+                           history=[sst.TCell(id=track_id, centroid=(0.0, 0.0), size=10,
+                                              t_start=t_end, t_end=t_end)])
+
+
+def test_expire_stale_tracks_deactivates_only_old_tracks():
+    li_limit_s = trk.CF_MAX_TRACK_GAP_MIN * 60
+    now = 100000.0
+    fresh = _track("fresh", now - li_limit_s + 1)
+    edge = _track("edge", now - li_limit_s)
+    stale = _track("stale", now - li_limit_s - 1)
+    inactive = _track("old", 0.0, active=False)
+    empty = sst.TStormTrack(id="empty", history=[])
+
+    expired = trk.expire_stale_tracks([fresh, edge, stale, inactive, empty], now)
+
+    assert expired == 1
+    assert fresh.active and edge.active and empty.active
+    assert not stale.active
+    assert not inactive.active
+
+
+def test_expired_track_is_not_associated_nor_saved(tmp_path):
+    stale = _track("stale", 0.0)
+    trk.expire_stale_tracks([stale], 10 * 3600.0)
+
+    assert trk.associate_cells([stale], [sst.TCell(centroid=(0.0, 0.0), size=10)]) == {}
+
+    path = tmp_path / "tracks.json"
+    trk.save_tracks(str(path), [stale], {"stale": klm.TKalmanTracker(0.0, 0.0)})
+    assert trk.load_tracks(str(path)) == ([], {})
+
+
+def _moving_track():
+    # track em (0,0) no instante 0, Kalman indo para leste a 1 grau/h (~111 km/h)
+    track = sst.TStormTrack(id="A", history=[sst.TCell(id="A", centroid=(0.0, 0.0), size=10,
+                                                       t_start=0, t_end=0)])
+    return track, {"A": klm.TKalmanTracker(0.0, 0.0, ff_vlat=0.0, ff_vlng=1.0)}
+
+
+def test_associate_cells_uses_kalman_predicted_position():
+    track, kalman = _moving_track()
+    # 1 h depois, a ~111 km da última posição observada (fora do raio de 100 km),
+    # mas exatamente onde o Kalman prevê
+    cell = sst.TCell(centroid=(0.0, 1.0), size=10, t_start=3600, t_end=3600)
+
+    assert trk.associate_cells([track], [cell]) == {}
+    assert trk.associate_cells([track], [cell], fdct_kalman_states=kalman) == {0: 0}
+
+
+def test_associate_cells_prediction_resolves_crossing_candidates():
+    track, kalman = _moving_track()
+    # 30 min depois: a célula a oeste está mais perto da última posição,
+    # a de leste está onde o Kalman prevê (lng 0.5)
+    west = sst.TCell(centroid=(0.0, -0.3), size=10, t_start=1800, t_end=1800)
+    east = sst.TCell(centroid=(0.0, 0.5), size=10, t_start=1800, t_end=1800)
+
+    assert trk.associate_cells([track], [west, east]) == {0: 0}
+    assert trk.associate_cells([track], [west, east], fdct_kalman_states=kalman) == {1: 0}
+
+
+def test_associate_cells_track_without_kalman_falls_back_to_last_position():
+    track, _ = _moving_track()
+    cell = sst.TCell(centroid=(0.0, 0.01), size=10, t_start=3600, t_end=3600)
+
+    assert trk.associate_cells([track], [cell], fdct_kalman_states={}) == {0: 0}

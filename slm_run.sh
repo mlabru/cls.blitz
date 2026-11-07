@@ -36,7 +36,7 @@
 #                     slm_setup_python; logs dos programas rotacionados
 # 2026.aug  mlabru  versão inicial (cron, sem daemon)
 #
-# depends on: slm_cfg.sh, slm_common.sh, met_common.sh, python3, flock,
+# depends on: slm_cfg.sh, slm_common.sh, cls_common.sh, python3, flock,
 #             ffmpeg, apps/slmDownloader.py, apps/slmMapper.py,
 #             apps/slmTracker.py, apps/slmRender.py
 

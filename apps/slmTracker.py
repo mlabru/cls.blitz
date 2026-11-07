@@ -13,13 +13,15 @@ o CSV de entrada é acumulativo (o downloader mantém a última hora):
     12:00 -> 12:05
     12:00 -> 12:10
     12:00 -> 12:15
-por isso só os eventos com ts > --since-ts são processados, e só os dos
-últimos CI_WINDOW_MINUTES desses são agrupados.
+--since-ts só decide se há frame novo (algum evento com ts > since_ts); o
+agrupamento usa sempre os últimos CI_WINDOW_MINUTES do CSV inteiro, contados
+do raio mais recente.
 
 fluxo (process):
-  1) lê o CSV e separa os eventos novos (load_csv, filter_new_events);
+  1) lê o CSV e verifica se há eventos novos (load_csv, filter_new_events);
   2) agrupa em células (cluster_window: janela + DBSCAN + estatísticas);
-  3) tracking (slm_track: load_tracks, associate_cells, update_tracks);
+  3) tracking (slm_track: load_tracks, expire_stale_tracks, associate_cells,
+     update_tracks);
   4) previsão e trilha de cada célula (_attach_forecast_and_history);
   5) grava o JSON do frame e depois o estado dos tracks.
 
@@ -29,6 +31,10 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
     python3 apps/slmTracker.py raw.csv frame.json --since-ts 1787010000 \
             --tracks-file data/state/slm_tracks_state.json
 
+2026.nov  mlabru  clustering na janela fixa do CSV inteiro (não só nos eventos
+                  novos): janela de tamanho constante e raios atrasados do
+                  último minuto não se perdem; tracks expiram por tempo antes
+                  da associação; associação contra a posição prevista
 2026.out  mlabru  refatoração para legibilidade: process, cluster_window e
                   load_csv divididos em funções de um passo só; main devolve
                   rc nomeado; logs de debug removidos, logging com %
@@ -182,7 +188,7 @@ def cluster_window(flst_events: list,
     [fix] t_start e t_end por cluster (não globais): flash_rate e density por
           célula corretos.
 
-    :param flst_events: lista de TLightning (os eventos novos)
+    :param flst_events: lista de TLightning (o CSV inteiro; a janela é recortada aqui)
     :param ff_window_minutes: tamanho da janela, em minutos
     :returns: lista de TCell (ainda sem ID de track)
     """
@@ -202,14 +208,12 @@ def _select_time_window(flst_events: list, ff_window_minutes: float) -> list:
     """
     os eventos dos últimos ff_window_minutes, contados a partir do mais recente.
 
-    [doc] por design ("agrupa só uma janela deslizante dos eventos mais novos,
-    não o arquivo todo"), eventos novos (ts > since_ts) mais antigos que a
-    janela são EXCLUÍDOS de propósito.  Como process() avança since_ts até o
-    evento mais recente do lote inteiro, esse atraso é descartado de vez, não
-    adiado: se o tracker ficar parado por mais que a janela (reinício,
-    instabilidade da REDEMET), os eventos mais antigos do atraso nunca formam
-    célula.  É uma ressincronização proposital com o estado convectivo atual,
-    não um bug a "consertar" reduzindo since_ts.
+    [doc] por design, eventos mais antigos que a janela são EXCLUÍDOS, mesmo
+    que nunca tenham entrado num frame: se o tracker ficar parado por mais
+    que a janela (reinício, instabilidade da REDEMET), o atraso nunca forma
+    célula.  É uma ressincronização proposital com o estado convectivo
+    atual.  Os tracks parados demais expiram por tempo
+    (trk.expire_stale_tracks), então não herdam células da volta.
 
     :param flst_events: lista (não vazia) de TLightning
     :param ff_window_minutes: tamanho da janela, em minutos
@@ -360,18 +364,27 @@ def process(fs_input_csv: str, fs_output_json: str,
     :returns: ts do evento novo mais recente; None se não houve frame
               (sem eventos, sem eventos novos ou sem células)
     """
-    llst_new_events = _load_new_events(fs_input_csv, ff_since_ts)
+    llst_all_events = _load_events(fs_input_csv)
 
-    if not llst_new_events:
+    if not _has_new_events(llst_all_events, ff_since_ts):
         return None
 
-    llst_cells = cluster_window(llst_new_events)
+    # [fix] o clustering usa a janela fixa dos últimos CI_WINDOW_MINUTES do CSV
+    # INTEIRO, não só os eventos novos: (a) a janela tem sempre o mesmo
+    # tamanho (antes eram ~5 min numa rodada normal e crescia quando não
+    # havia célula), então size/flash_rate/density são comparáveis entre
+    # frames; (b) raios que chegam atrasados com ts == since_ts (a API tem
+    # resolução de minuto e o último minuto chega incompleto) entram no
+    # frame seguinte em vez de se perderem.  since_ts só decide SE há frame.
+    llst_cells = cluster_window(llst_all_events)
 
     if not llst_cells:
         M_LOG.warning("sem células detectadas.")
         return None
 
-    llst_tracks, ldct_kalman_states = _track_cells(llst_cells, fs_tracks_file)
+    lf_newest_ts = llst_all_events[-1].ts
+
+    llst_tracks, ldct_kalman_states = _track_cells(llst_cells, fs_tracks_file, lf_newest_ts)
 
     _attach_forecast_and_history(llst_cells, llst_tracks, ldct_kalman_states)
 
@@ -386,17 +399,15 @@ def process(fs_input_csv: str, fs_output_json: str,
 
     M_LOG.info("frame exportado para %s (%d células).", fs_output_json, len(llst_cells))
 
-    return max(l_event.ts for l_event in llst_new_events)
+    return lf_newest_ts
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _load_new_events(fs_input_csv: str, ff_since_ts: float) -> list:
+def _load_events(fs_input_csv: str) -> list:
     """
-    lê o CSV e devolve só os eventos novos, ordenados por instante.
+    lê o CSV e devolve todos os eventos, ordenados por instante.
 
     :param fs_input_csv: CSV acumulado de raios
-    :param ff_since_ts: instante de corte (epoch UTC)
-    :returns: lista de TLightning com ts > ff_since_ts, em ordem de ts; vazia
-              se não houver eventos (o motivo vai para o log)
+    :returns: lista de TLightning em ordem de ts; vazia se o CSV não tiver eventos
     """
     llst_all_events = load_csv(fs_input_csv)
 
@@ -406,31 +417,50 @@ def _load_new_events(fs_input_csv: str, ff_since_ts: float) -> list:
 
     M_LOG.info("%d eventos carregados.", len(llst_all_events))
 
-    llst_new_events = filter_new_events(llst_all_events, ff_since_ts)
+    llst_all_events.sort(key=lambda l_event: l_event.ts)
 
-    if not llst_new_events:
-        M_LOG.warning("sem novos eventos.")
-        return []
-
-    M_LOG.info("%d novos eventos encontrados.", len(llst_new_events))
-
-    llst_new_events.sort(key=lambda l_event: l_event.ts)
-
-    return llst_new_events
+    return llst_all_events
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _track_cells(flst_cells: list, fs_tracks_file: str) -> tuple:
+def _has_new_events(flst_events: list, ff_since_ts: float) -> bool:
     """
-    tracking de um frame: lê o estado anterior, associa as células aos tracks
-    (algoritmo húngaro) e atualiza os tracks.  As células recebem o ID do track.
+    há eventos posteriores ao último frame?
+
+    :param flst_events: lista de TLightning
+    :param ff_since_ts: instante de corte (epoch UTC)
+    :returns: True se algum evento tiver ts > ff_since_ts (a quantidade vai para o log)
+    """
+    li_new_count = len(filter_new_events(flst_events, ff_since_ts))
+
+    if 0 == li_new_count:
+        if flst_events:
+            M_LOG.warning("sem novos eventos.")
+
+        return False
+
+    M_LOG.info("%d novos eventos encontrados.", li_new_count)
+
+    return True
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _track_cells(flst_cells: list, fs_tracks_file: str, ff_now_ts: float) -> tuple:
+    """
+    tracking de um frame: lê o estado anterior, desativa os tracks parados há
+    tempo demais, associa as células aos tracks (algoritmo húngaro, contra a
+    posição prevista pelo Kalman) e atualiza os tracks.  As células recebem o
+    ID do track.
 
     :param flst_cells: células do frame atual (ALTERADAS)
     :param fs_tracks_file: arquivo de estado dos tracks
+    :param ff_now_ts: instante do frame (ts do raio mais recente, epoch UTC)
     :returns: (lista de TStormTrack, {id do track: TKalmanTracker}) atualizados
     """
     llst_tracks, ldct_kalman_states = trk.load_tracks(fs_tracks_file)
 
-    ldct_association = trk.associate_cells(llst_tracks, flst_cells)
+    trk.expire_stale_tracks(llst_tracks, ff_now_ts)
+
+    ldct_association = trk.associate_cells(llst_tracks, flst_cells,
+                                           fdct_kalman_states=ldct_kalman_states)
 
     return trk.update_tracks(llst_tracks, ldct_kalman_states, flst_cells, ldct_association)
 

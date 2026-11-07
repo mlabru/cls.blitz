@@ -99,7 +99,7 @@ def _project(fpth_tmp: pathlib.Path, fdct_rc: dict | None = None) -> pathlib.Pat
     (lpth_proj / "apps").mkdir(parents=True)
     (lpth_proj / "bin").mkdir()
 
-    for ls_file in (CS_SCRIPT, "slm_cfg.sh", "slm_common.sh", "met_common.sh"):
+    for ls_file in (CS_SCRIPT, "slm_cfg.sh", "slm_common.sh", "cls_common.sh"):
         shutil.copy(MPTH_ROOT / ls_file, lpth_proj / ls_file)
 
     for ls_name in CLST_APPS:

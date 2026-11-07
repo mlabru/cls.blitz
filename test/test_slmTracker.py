@@ -157,3 +157,79 @@ def test_load_csv_empty_file_returns_empty_list(tmp_path):
     csv_path.write_text("")
 
     assert trkmod.load_csv(str(csv_path)) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# janela fixa no CSV inteiro e expiração por tempo (2026.nov)
+
+def _write_csv(path, rows):
+    path.write_text("timestamp,lat,lng\n" + "".join(f"{t},{la},{lo}\n" for t, la, lo in rows))
+
+
+def _run(tmp_path, rows, since_ts, name="frame.json"):
+    csv_path = tmp_path / "raw.csv"
+    _write_csv(csv_path, rows)
+    json_path = tmp_path / name
+    newest = trkmod.process(str(csv_path), str(json_path), since_ts, str(tmp_path / "tracks.json"))
+    frame = json.loads(json_path.read_text()) if newest is not None else None
+    return newest, frame
+
+
+def test_process_clusters_old_and_new_events_of_the_window(tmp_path):
+    # [fix] antes só os eventos novos eram agrupados: 6 + 6 não formavam célula
+    rows = [(1000, 0.0, 0.0)] * 6 + [(1060 + i, 0.0, 0.0) for i in range(6)]
+
+    newest, frame = _run(tmp_path, rows, since_ts=1000)
+
+    assert newest == 1065
+    assert len(frame) == 1
+    assert frame[0]["size"] == 12
+
+
+def test_process_keeps_late_strikes_of_the_last_minute(tmp_path):
+    # rodada 1: 10 raios no minuto 1000 -> since_ts vira 1000
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    newest, _ = _run(tmp_path, rows, since_ts=0)
+    assert newest == 1000
+
+    # rodada 2: chegam 3 raios atrasados do MESMO minuto e 10 do minuto seguinte
+    rows += [(1000, 0.001, 0.001)] * 3 + [(1060, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    newest, frame = _run(tmp_path, rows, since_ts=newest, name="frame2.json")
+
+    assert newest == 1060
+    assert frame[0]["size"] == 2 * trkmod.CI_MIN_PTS + 3
+
+
+def test_process_window_excludes_events_older_than_window(tmp_path):
+    li_window_s = trkmod.CI_WINDOW_MINUTES * 60
+    rows = [(1000, 0.0, 0.0)] * 20 + [(1000 + li_window_s + 60, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+
+    _, frame = _run(tmp_path, rows, since_ts=1000)
+
+    assert frame[0]["size"] == trkmod.CI_MIN_PTS
+
+
+def test_process_without_new_events_returns_none_even_with_old_events(tmp_path):
+    rows = [(1000, 0.0, 0.0)] * 20
+
+    newest, _ = _run(tmp_path, rows, since_ts=1000)
+
+    assert newest is None
+
+
+def test_process_expired_track_does_not_inherit_cell(tmp_path):
+    li_gap_s = int(trkmod.trk.CF_MAX_TRACK_GAP_MIN * 60)
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    _, frame1 = _run(tmp_path, rows, since_ts=0)
+
+    # mesma posição, mas depois do limite de expiração: track novo
+    rows2 = [(1000 + li_gap_s + 60, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    _, frame2 = _run(tmp_path, rows2, since_ts=1000, name="frame2.json")
+
+    assert frame2[0]["id"] != frame1[0]["id"]
+
+    # dentro do limite: continua o mesmo track
+    rows3 = rows2 + [(1000 + li_gap_s + 300, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    _, frame3 = _run(tmp_path, rows3, since_ts=1000 + li_gap_s + 60, name="frame3.json")
+
+    assert frame3[0]["id"] == frame2[0]["id"]

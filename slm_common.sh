@@ -21,7 +21,7 @@
 #                   - só cron: init_fifo e is_running (FIFO e sentinela de
 #                     shutdown do daemon) saem com os workers, movidos para
 #                     .bkp/
-#                   - check_log_size e o corpo do log() vêm do met_common.sh
+#                   - check_log_size e o corpo do log() vêm do cls_common.sh
 #                     (symlink para 04.dvl/bash); timestamp do log em UTC
 #                   - slm_enter_run_dir (era ensure_dirs + cd) e
 #                     slm_setup_python (venv, PYTHONPATH), como no nowcast;
@@ -31,13 +31,13 @@
 # 2026.may  mlabru  refatorado para orquestrador de scripts independentes
 # 2026.mar  mlabru  versão inicial (Linux/Bash)
 #
-# depends on: bash, met_common.sh, ffmpeg, flock, python3; variáveis do
+# depends on: bash, cls_common.sh, ffmpeg, flock, python3; variáveis do
 #             slm_cfg.sh; SLM_LOG_APP/SLM_LOG_ERR (definidas pelo script)
 #             para log()
 # shellcheck shell=bash
 
-# check_log_size e met_log (met_common.sh, compartilhado pelos projetos met)
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/met_common.sh"
+# check_log_size e met_log (cls_common.sh, compartilhado pelos projetos met)
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cls_common.sh"
 
 # < início comum >---------------------------------------------------------------------
 

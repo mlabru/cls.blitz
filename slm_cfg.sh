@@ -22,12 +22,12 @@
 #                   - SLM_LIB_DIR (código) e SLM_VENV (padrão ~/.venv),
 #                     como NWC_LIB_DIR/NWC_VENV do 27.nowcast
 #                   - trava do ambiente de teste via met_check_test_env
-#                     (met_common.sh, symlink), comum aos outros projetos
+#                     (cls_common.sh, symlink), comum aos outros projetos
 #                   - os logs do próprio shell passam a ser definidos pelo
 #                     script (slm_run.sh), como nas irmãs
 # 2026.aug  mlabru  extraído de slm_common.sh
 
-# depends on: bash, met_common.sh
+# depends on: bash, cls_common.sh
 # shellcheck shell=bash
 
 # < configuração >---------------------------------------------------------------------
@@ -104,8 +104,8 @@ GI_MP4_CRF=23
 
 # < trava do ambiente de teste >-------------------------------------------------------
 
-# met_check_test_env (met_common.sh, compartilhado pelos projetos met)
-source "${SLM_LIB_DIR}/met_common.sh"
+# met_check_test_env (cls_common.sh, compartilhado pelos projetos met)
+source "${SLM_LIB_DIR}/cls_common.sh"
 
 # com MET_ENV=test (21.mvol/tst_env), SLM_PATH precisa estar dentro de
 # MET_TST_ROOT.  Roda no source, antes de qualquer mkdir/log/lock

@@ -9,15 +9,20 @@ acompanhamento (tracking) das células convectivas de um frame para o outro.
 
   - estatísticas da célula: centroide, densidade, taxa de raios;
   - associação: qual célula do frame atual continua qual track
-    (associate_cells, algoritmo húngaro = melhor combinação global);
+    (associate_cells, algoritmo húngaro = melhor combinação global, distância
+    medida até a posição prevista pelo Kalman);
   - ciclo de vida dos tracks (update_tracks): histórico, velocidade suavizada
-    (EMA), filtro de Kalman, frames perdidos e desativação;
+    (EMA), filtro de Kalman, frames perdidos e desativação; expiração por
+    tempo (expire_stale_tracks);
   - persistência entre execuções (load_tracks / save_tracks) em
     slm_tracks_state.json -- apagar esse arquivo zera todos os IDs de track.
 
 fluxo de um frame (chamado por slmTracker.process):
-  load_tracks -> associate_cells -> update_tracks -> save_tracks
+  load_tracks -> expire_stale_tracks -> associate_cells -> update_tracks -> save_tracks
 
+2026.nov  mlabru  expire_stale_tracks (tracks expiram por tempo, não só por
+                  frames perdidos); associate_cells mede a distância até a
+                  posição prevista pelo Kalman no instante da célula
 2026.out  mlabru  refatoração para legibilidade: update_tracks, associate_cells,
                   load_tracks e save_tracks divididos em funções de um passo
                   só; horas entre células por slm_motion.elapsed_hours; logs
@@ -61,6 +66,10 @@ CI_MAX_HISTORY = 12
 
 # frames seguidos sem associação antes de desativar o track
 CI_MAX_MISSED_FRAMES = 3
+
+# minutos sem raio (desde o t_end da última célula) antes de expirar o track,
+# conte ou não frames perdidos -- cobre o tracker parado ou rodadas sem célula
+CF_MAX_TRACK_GAP_MIN = 30.0
 
 # distância (km) acima da qual duas células nunca são associadas
 CF_MAX_DIST_KM = 100.0
@@ -203,7 +212,8 @@ def _size_ratio(fi_size_a: int, fi_size_b: int) -> float:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def associate_cells(flst_tracks: list, flst_cells_curr: list,
-                    ff_max_dist_km: float = CF_MAX_DIST_KM) -> dict:
+                    ff_max_dist_km: float = CF_MAX_DIST_KM,
+                    fdct_kalman_states: dict | None = None) -> dict:
     """
     decide qual célula do frame atual continua qual track.
 
@@ -215,10 +225,16 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
 
     [fix] o guloso (vizinho mais próximo) foi trocado pelo húngaro: assim um
           track não "rouba" a célula mais próxima de outro.
+    [fix] com fdct_kalman_states, a distância é medida até onde o Kalman do
+          track prevê a célula no instante dela (_reference_position), não
+          até a última posição observada: uma célula rápida ou um frame
+          perdido não a empurram para fora do raio de associação.
 
     :param flst_tracks: todos os tracks (ativos e inativos)
     :param flst_cells_curr: células do frame atual
     :param ff_max_dist_km: distância máxima para associar
+    :param fdct_kalman_states: {id do track: TKalmanTracker}; None (ou track
+                               sem filtro) = usa a última posição observada
     :returns: dict {índice da célula atual: índice do track em flst_tracks},
               só com as associações aceitas
     """
@@ -230,7 +246,8 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
     if not llst_active_tracks or not flst_cells_curr:
         return {}
 
-    lnp_cost = _build_cost_matrix(llst_active_tracks, flst_cells_curr, ff_max_dist_km)
+    lnp_cost = _build_cost_matrix(llst_active_tracks, flst_cells_curr, ff_max_dist_km,
+                                  fdct_kalman_states or {})
 
     llst_rows, llst_columns = opt.linear_sum_assignment(lnp_cost)
 
@@ -238,7 +255,7 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
-                       ff_max_dist_km: float) -> np.ndarray:
+                       ff_max_dist_km: float, fdct_kalman_states: dict) -> np.ndarray:
     """
     matriz de custo tracks x células para o algoritmo húngaro.
     começa toda em CF_NO_MATCH_COST; só os pares a até ff_max_dist_km recebem
@@ -247,6 +264,7 @@ def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
     :param flst_active_tracks: lista de (índice original, TStormTrack) ativos
     :param flst_cells_curr: células do frame atual
     :param ff_max_dist_km: distância máxima para associar
+    :param fdct_kalman_states: {id do track: TKalmanTracker} (pode ser vazio)
     :returns: array (n_tracks, n_células) de custos em [0, 1]
     """
     lnp_cost = np.full((len(flst_active_tracks), len(flst_cells_curr)),
@@ -254,9 +272,12 @@ def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
 
     for li_row, (_, l_track) in enumerate(flst_active_tracks):
         l_last_cell = l_track.last_cell
+        l_kalman = fdct_kalman_states.get(l_track.id)
 
         for li_column, l_cell in enumerate(flst_cells_curr):
-            lf_distance_km = spc.haversine_km(l_last_cell.centroid[0], l_last_cell.centroid[1],
+            lf_ref_lat, lf_ref_lng = _reference_position(l_last_cell, l_cell, l_kalman)
+
+            lf_distance_km = spc.haversine_km(lf_ref_lat, lf_ref_lng,
                                               l_cell.centroid[0], l_cell.centroid[1])
 
             if lf_distance_km > ff_max_dist_km:
@@ -266,6 +287,29 @@ def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
                                                       ff_dist_km=lf_distance_km)
 
     return lnp_cost
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _reference_position(f_last_cell: sst.TCell, f_cell: sst.TCell,
+                        f_kalman: klm.TKalmanTracker | None) -> tuple:
+    """
+    onde o track "deveria" estar no instante da célula candidata: a posição
+    prevista pelo Kalman, avançado desde a última célula do track
+    (mesmo dt que _continue_track usa no predict).
+
+    :param f_last_cell: última célula do track
+    :param f_cell: célula candidata do frame atual
+    :param f_kalman: filtro do track; None = sem previsão
+    :returns: (lat, lng) de referência; a última posição observada se não
+              houver filtro
+    """
+    if f_kalman is None:
+        return f_last_cell.centroid[0], f_last_cell.centroid[1]
+
+    lf_elapsed_hours = max(mtn.elapsed_hours(f_last_cell, f_cell), 0.0)
+
+    lf_lat, lf_lng, _, _ = f_kalman.predict_position(lf_elapsed_hours)
+
+    return lf_lat, lf_lng
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _accept_assignments(fnp_cost: np.ndarray, flst_rows: list, flst_columns: list,
@@ -433,6 +477,41 @@ def _count_missed_frame(f_track: sst.TStormTrack) -> None:
     f_track.active = False
     M_LOG.info("track %s desativado após %d frames sem match.",
                f_track.id, CI_MAX_MISSED_FRAMES)
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def expire_stale_tracks(flst_tracks: list, ff_now_ts: float,
+                        ff_max_gap_min: float = CF_MAX_TRACK_GAP_MIN) -> int:
+    """
+    desativa os tracks cujo último raio é mais antigo que ff_max_gap_min.
+
+    [fix] _count_missed_frame só conta frames que tiveram célula: com o
+    tracker parado (REDEMET fora, reinício) ou rodadas sem célula, um track
+    velho continuava ativo e, na volta, herdava qualquer célula a menos de
+    CF_MAX_DIST_KM, com um dt de horas no Kalman e na velocidade.  Idempotente
+    (só depende de ff_now_ts), então pode rodar a cada frame antes da
+    associação.
+
+    :param flst_tracks: tracks lidos do estado (ALTERADOS)
+    :param ff_now_ts: instante do frame atual (epoch UTC)
+    :param ff_max_gap_min: minutos sem raio que expiram um track
+    :returns: quantos tracks foram desativados
+    """
+    lf_oldest_ts = ff_now_ts - ff_max_gap_min * 60.0
+    li_expired = 0
+
+    for l_track in flst_tracks:
+        l_last_cell = l_track.last_cell
+
+        if not l_track.active or l_last_cell is None or l_last_cell.t_end >= lf_oldest_ts:
+            continue
+
+        l_track.active = False
+        li_expired += 1
+
+        M_LOG.info("track %s expirado: sem raio há %.0f min.",
+                   l_track.id, (ff_now_ts - l_last_cell.t_end) / 60.0)
+
+    return li_expired
 
 # ═════════════════════════════════════════════════════════════════════════════════════
 # persistência
