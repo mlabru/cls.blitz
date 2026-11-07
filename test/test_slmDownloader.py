@@ -123,6 +123,7 @@ def test_download_raios_writes_csv(tmp_path, monkeypatch):
     class _Args:
         saida = str(tmp_path)
         fname = "out.csv"
+        archive_dir = None
 
     assert dl.download_raios(_Args()) is True
 
@@ -137,6 +138,7 @@ def test_download_raios_no_data_fails(tmp_path, monkeypatch):
     class _Args:
         saida = str(tmp_path)
         fname = "out.csv"
+        archive_dir = None
 
     assert dl.download_raios(_Args()) is False
 
@@ -187,3 +189,61 @@ def test_drop_duplicates_preserves_order_of_new_rows():
     new = _rows((120, 9.0, 9.0), (60, 1.5, 2.5), (180, 8.0, 8.0))
 
     assert dl._drop_duplicates(new, kept) == _rows((120, 9.0, 9.0), (180, 8.0, 8.0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# arquivo diário dos raios (2026.nov)
+
+def _snapshot(monkeypatch, positions_per_minute):
+    monkeypatch.setattr(dl, "get_redemet_raios", lambda: {
+        "anima": ["00:00", "00:01"][:len(positions_per_minute)],
+        "stsc": positions_per_minute,
+    })
+    monkeypatch.setattr(dl.datetime, "datetime", _FixedDateTime)
+
+
+def _args(tmp_path, archive):
+    class _Args:
+        saida = str(tmp_path)
+        fname = "out.csv"
+        archive_dir = archive
+    return _Args()
+
+
+def test_download_raios_archives_only_new_rows(tmp_path, monkeypatch):
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(dl.time, "time", lambda: 1_000_000.0)
+    _snapshot(monkeypatch, [[{"la": 1.0, "lo": 2.0}]])
+    assert dl.download_raios(_args(tmp_path, str(archive))) is True
+
+    # a API repete a hora inteira: só o raio do minuto novo é arquivado
+    monkeypatch.setattr(dl.time, "time", lambda: 1_000_300.0)
+    _snapshot(monkeypatch, [[{"la": 1.0, "lo": 2.0}], [{"la": 3.0, "lo": 4.0}]])
+    assert dl.download_raios(_args(tmp_path, str(archive))) is True
+
+    rows = dl.arc.load([str(p) for p in archive.iterdir()])
+    assert [(r[0], r[2], r[3]) for r in rows] == [(1_000_000.0, 1.0, 2.0), (1_000_300.0, 3.0, 4.0)]
+
+
+def test_download_raios_archive_failure_is_only_a_warning(tmp_path, monkeypatch, caplog):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")                                # um arquivo onde iria o diretório
+    _snapshot(monkeypatch, [[{"la": 1.0, "lo": 2.0}]])
+
+    assert dl.download_raios(_args(tmp_path, str(blocker / "archive"))) is True
+
+    assert (tmp_path / "out.csv").exists()
+    assert "falha ao arquivar" in caplog.text
+
+
+def test_download_raios_without_archive_dir_writes_no_archive(tmp_path, monkeypatch):
+    _snapshot(monkeypatch, [[{"la": 1.0, "lo": 2.0}]])
+
+    assert dl.download_raios(_args(tmp_path, None)) is True
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.csv"]
+
+
+def test_arg_parse_archive_dir():
+    assert dl.arg_parse([]).archive_dir is None
+    assert dl.arg_parse(["-a", "/x"]).archive_dir == "/x"

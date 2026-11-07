@@ -21,6 +21,7 @@
 # cada 5 min (com */10, metade dos snapshots se perdia):
 #   */5 * * * * /caminho/para/slm_run.sh >> /caminho/para/logs/slm_run_cron.log 2>&1
 #
+# 2026.nov  mlabru  CSVs de diagnóstico (SLM_ASSOC_FILE, SLM_FRAMES_FILE) rotacionados
 # 2026.nov  mlabru  CSV de verificação (SLM_VERIFY_FILE) rotacionado como os logs
 # 2026.out  mlabru  [fix] crontab de exemplo a cada 5 min (era */10)
 # 2026.out  mlabru  - refatoração no molde do nwc_interpol.sh (27.nowcast):
@@ -142,10 +143,11 @@ main()
 
     acquire_instance_lock
 
-    # o CSV de verificação também só cresce: mesma rotação dos logs
+    # os CSVs de verificação e de diagnóstico também só crescem: mesma
+    # rotação dos logs (o histórico longo para calibrar está no SLM_ARCHIVE)
     check_log_size "${SLM_LOGS}/slmDownloader.log" "${SLM_LOGS}/slmMapper.log" \
                    "${SLM_LOGS}/slmTracker.log" "${SLM_LOGS}/slmRender.log" \
-                   "${SLM_VERIFY_FILE}"
+                   "${SLM_VERIFY_FILE}" "${SLM_ASSOC_FILE}" "${SLM_FRAMES_FILE}"
 
     slm_setup_python
 

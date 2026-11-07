@@ -63,3 +63,46 @@ def test_falha_no_writer_apaga_tmp_e_preserva_o_arquivo(tmp_path):
     assert ["estado.json"] == [lp.name for lp in tmp_path.iterdir()]
 
 # < the end >──────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# append_csv_rows (2026.nov)
+
+def test_append_csv_rows_header_once_and_blank_missing_keys(tmp_path):
+    path = tmp_path / "log.csv"
+
+    assert ioutil.append_csv_rows(str(path), ["a", "b"], [{"a": 1}]) is False
+    ioutil.append_csv_rows(str(path), ["a", "b"], [{"a": 2, "b": 3}])
+
+    assert path.read_text().splitlines() == ["a,b", "1,", "2,3"]
+
+
+def test_append_csv_rows_empty_does_nothing(tmp_path):
+    path = tmp_path / "log.csv"
+
+    assert ioutil.append_csv_rows(str(path), ["a"], []) is False
+    assert not path.exists()
+
+
+def test_append_csv_rows_header_after_rotation_to_empty(tmp_path):
+    path = tmp_path / "log.csv"
+    path.write_text("")
+
+    ioutil.append_csv_rows(str(path), ["a"], [{"a": 1}])
+
+    assert path.read_text().splitlines() == ["a", "1"]
+
+
+def test_append_csv_rows_rotates_file_with_other_layout(tmp_path):
+    path = tmp_path / "log.csv"
+    path.write_text("a\n1\n")
+
+    assert ioutil.append_csv_rows(str(path), ["a", "b"], [{"a": 2, "b": 3}]) is True
+
+    assert (tmp_path / "log.csv.old").read_text() == "a\n1\n"
+    assert path.read_text().splitlines() == ["a,b", "2,3"]
+
+
+def test_append_csv_rows_rejects_unknown_key(tmp_path):
+    with pytest.raises(ValueError):
+        ioutil.append_csv_rows(str(tmp_path / "log.csv"), ["a"], [{"a": 1, "z": 2}])

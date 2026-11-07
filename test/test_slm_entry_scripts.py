@@ -28,6 +28,7 @@ MPTH_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # programas com argparse (--help não lê CSV nem chama a REDEMET)
 CLST_SCRIPTS = ["apps/slmDownloader.py",
+                "apps/slmReplay.py",
                 "apps/slmTracker.py",
                 "apps/slmRender.py",
                 "apps/slmMapper.py"]

@@ -18,17 +18,22 @@ fluxo (download_raios):
   4) tira as linhas novas que já estavam no CSV (a API devolve a última
      hora inteira a cada chamada) -- _drop_duplicates;
   5) grava o CSV completo de forma atômica (slm_ioutil.atomic_write_csv),
-     porque o tracker e o mapper leem esse arquivo em outro processo.
+     porque o tracker e o mapper leem esse arquivo em outro processo;
+  6) com --archive-dir, acrescenta as linhas novas ao arquivo diário dos
+     raios (slm_archive, para o slmReplay) e apaga os dias além de
+     CI_ARCHIVE_DAYS.  Falha aqui só gera aviso: o pipeline não depende dele.
 
 formato do CSV (contrato com slmTracker.load_csv e slmMapper.le_input):
     timestamp,lat,lng      (timestamp = epoch UTC em segundos, inteiro)
 
-    python3 apps/slmDownloader.py -f slm_lightning.csv -s ./data/raw
+    python3 apps/slmDownloader.py -f slm_lightning.csv -s ./data/raw -a ./data/archive
 
 códigos de retorno (contrato com o slm_run.sh, que só testa "deu zero?"):
 0 ok, 1 falha (sem API key, REDEMET indisponível/resposta inválida, erro de
 gravação).  Em falha o CSV anterior fica intacto.
 
+2026.nov  mlabru  arquivo diário dos raios novos (--archive-dir, slm_archive),
+                  base do reprocessamento para calibração (slmReplay)
 2026.nov  mlabru  [fix] deduplicação por contagem (multiconjunto): dois raios
                   reais no mesmo minuto e ponto não viram um só
 2026.out  mlabru  [fix] resposta sem "anima"/"stsc" e posição sem "la"/"lo"
@@ -55,11 +60,13 @@ import json
 import logging
 import os
 import sys
+import time
 
 # requests
 import requests
 
 # locals
+import work.slm_archive as arc
 import work.slm_defs as defs
 import work.slm_ioutil as ioutil
 
@@ -102,7 +109,8 @@ def arg_parse(flst_argv: list | None = None) -> argparse.Namespace:
     lê os argumentos da linha de comando.
 
     :param flst_argv: argumentos (None = sys.argv[1:])
-    :returns: namespace com fname (nome do CSV) e saida (diretório)
+    :returns: namespace com fname (nome do CSV), saida (diretório) e
+              archive_dir (None = não arquiva)
     """
     l_parser = argparse.ArgumentParser(description="Simple Lightning Model download.")
 
@@ -112,6 +120,9 @@ def arg_parse(flst_argv: list | None = None) -> argparse.Namespace:
     l_parser.add_argument("-s", "--saida",
                           help="Output folder.",
                           dest="saida", type=str, default=CS_OUTPUT_DIR)
+    l_parser.add_argument("-a", "--archive-dir",
+                          help="Daily archive folder of new strikes (for slmReplay).",
+                          dest="archive_dir", type=str, default=None)
 
     return l_parser.parse_args(flst_argv)
 
@@ -156,7 +167,42 @@ def download_raios(f_args: argparse.Namespace) -> bool:
     M_LOG.info("novos registros após deduplicação: %d.", len(llst_unique_new_rows))
 
     # 5) grava tudo de uma vez
-    return _write_csv(ls_csv_path, llst_kept_rows + llst_unique_new_rows)
+    if not _write_csv(ls_csv_path, llst_kept_rows + llst_unique_new_rows):
+        return False
+
+    # 6) arquivo diário (não afeta o resultado)
+    if f_args.archive_dir:
+        _archive_new_rows(f_args.archive_dir, llst_unique_new_rows)
+
+    return True
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _archive_new_rows(fs_archive_dir: str, flst_new_rows: list[dict]) -> None:
+    """
+    acrescenta as linhas novas desta rodada ao arquivo diário e apaga os
+    dias vencidos (slm_archive).
+
+    [doc] chamado só DEPOIS do CSV gravado: se a gravação falhar, a próxima
+    rodada traz os mesmos raios de novo como "novos" e eles são arquivados
+    uma vez só.  Erro aqui vira aviso: o pipeline não depende do archive.
+
+    :param fs_archive_dir: diretório do archive
+    :param flst_new_rows: linhas que o _drop_duplicates deixou passar
+    """
+    lf_now_ts = time.time()
+
+    try:
+        arc.append_rows(fs_archive_dir, flst_new_rows, lf_now_ts)
+        li_removed = arc.purge_old(fs_archive_dir, lf_now_ts)
+
+    except OSError as l_err:
+        M_LOG.warning("falha ao arquivar em '%s': %s", fs_archive_dir, str(l_err))
+        return
+
+    M_LOG.info("arquivados %d registros novos em '%s'.", len(flst_new_rows), fs_archive_dir)
+
+    if li_removed > 0:
+        M_LOG.info("%d arquivos vencidos apagados do archive.", li_removed)
 
 # ═════════════════════════════════════════════════════════════════════════════════════
 # passo 1: snapshot da REDEMET

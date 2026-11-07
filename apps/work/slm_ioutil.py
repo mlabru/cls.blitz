@@ -18,7 +18,11 @@ inteiro, nunca um arquivo pela metade.
                      (texto ou binário -- o PNG do slm_mapbase usa binário)
   atomic_write_json  um objeto como JSON (estado dos tracks, frame)
   atomic_write_csv   uma lista de dicts como CSV com cabeçalho (raios)
+  append_csv_rows    acrescenta linhas a um CSV-registro (verificação,
+                     diagnóstico): NÃO é atômica -- ver a docstring
 
+2026.nov  mlabru  append_csv_rows (registros que só crescem, com cabeçalho e
+                  rotação quando as colunas mudam)
 2026.out  mlabru  temporário apagado se a gravação falhar; modo binário (PNG)
 2026.out  mlabru  refatoração para legibilidade: log de debug removido;
                   atomic_write genérica e atomic_write_csv (a escrita atômica
@@ -108,5 +112,64 @@ def atomic_write_csv(fs_path: str, flst_fieldnames: list, flst_rows: list) -> No
         l_writer.writerows(flst_rows)
 
     atomic_write(fs_path, write_csv, fs_newline="")
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def append_csv_rows(fs_path: str, flst_fieldnames: list, flst_rows: list) -> bool:
+    """
+    acrescenta linhas a um CSV que só cresce (registro), com cabeçalho.
+
+    [doc] append, não escrita atômica: são registros com um só escritor (o
+    flock do slm_run.sh serializa as rodadas) que nenhum outro processo do
+    pipeline lê.  O cabeçalho é escrito quando o arquivo não existe ou está
+    vazio (o check_log_size do slm_run.sh rotaciona deixando-o vazio).
+
+    [new] se o arquivo já existe com OUTRO cabeçalho (versão anterior com
+    menos colunas), ele é renomeado para "<caminho>.old" e um novo começa:
+    misturar layouts num mesmo CSV quebraria a análise.
+
+    :param fs_path: caminho do CSV (o diretório já precisa existir)
+    :param flst_fieldnames: colunas, na ordem do arquivo
+    :param flst_rows: dicts; chave ausente vira campo vazio; vazia = nada é feito
+    :returns: True se um arquivo antigo de outro layout foi renomeado
+    :raises ValueError: se uma linha tiver chave fora de flst_fieldnames
+    """
+    if not flst_rows:
+        return False
+
+    lb_rotated = _rotate_if_header_differs(fs_path, flst_fieldnames)
+
+    lb_needs_header = not os.path.isfile(fs_path) or 0 == os.path.getsize(fs_path)
+
+    with open(fs_path, "a", encoding="utf-8", newline="") as l_file:
+        l_writer = csv.DictWriter(l_file, fieldnames=flst_fieldnames, restval="")
+
+        if lb_needs_header:
+            l_writer.writeheader()
+
+        l_writer.writerows(flst_rows)
+
+    return lb_rotated
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _rotate_if_header_differs(fs_path: str, flst_fieldnames: list) -> bool:
+    """
+    renomeia o CSV para "<caminho>.old" se o cabeçalho dele não for flst_fieldnames.
+
+    :param fs_path: caminho do CSV
+    :param flst_fieldnames: colunas esperadas
+    :returns: True se renomeou; False se não existe, está vazio ou o cabeçalho confere
+    """
+    if not os.path.isfile(fs_path) or 0 == os.path.getsize(fs_path):
+        return False
+
+    with open(fs_path, encoding="utf-8", newline="") as l_file:
+        llst_header = next(csv.reader(l_file), [])
+
+    if llst_header == list(flst_fieldnames):
+        return False
+
+    os.replace(fs_path, fs_path + ".old")
+
+    return True
 
 # < the end >──────────────────────────────────────────────────────────────────────────

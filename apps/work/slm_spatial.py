@@ -19,6 +19,8 @@ fluxo (dbscan_spatial):
 regra do projeto: distância sempre com haversine_km, nunca com a diferença
 de lat/lng em graus (ver slm_geo).
 
+2026.nov  mlabru  parâmetros de algoritmo lidos na chamada, não na definição
+                  (padrão None): o slmReplay sobrescreve as constantes
 2026.nov  mlabru  [fix] raio de borda entra em UM cluster só (o primeiro que o
                   alcança): antes podia entrar em dois, inflando size/density
 2026.out  mlabru  refatoração para legibilidade: expand_cluster devolve o
@@ -49,17 +51,24 @@ CI_DEFAULT_MIN_PTS = 10
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def dbscan_spatial(flst_events: list,
-                   ff_eps_km: float = CF_DEFAULT_EPS_KM,
-                   fi_min_pts: int = CI_DEFAULT_MIN_PTS) -> list:
+                   ff_eps_km: float | None = None,
+                   fi_min_pts: int | None = None) -> list:
     """
     agrupa raios em clusters por densidade (DBSCAN com índice em grade).
 
     :param flst_events: lista de TLightning
-    :param ff_eps_km: raio de vizinhança, em km
-    :param fi_min_pts: mínimo de vizinhos (contando o próprio ponto) para ser ponto central
+    :param ff_eps_km: raio de vizinhança, em km (None = CF_DEFAULT_EPS_KM)
+    :param fi_min_pts: mínimo de vizinhos (contando o próprio ponto) para ser
+                       ponto central (None = CI_DEFAULT_MIN_PTS)
     :returns: lista de clusters; cada cluster é uma lista de TLightning.
               Raios de ruído não aparecem em nenhum cluster.
     """
+    if ff_eps_km is None:
+        ff_eps_km = CF_DEFAULT_EPS_KM
+
+    if fi_min_pts is None:
+        fi_min_pts = CI_DEFAULT_MIN_PTS
+
     l_grid = _build_grid(flst_events, ff_eps_km)
 
     # pontos já visitados e pontos já colocados num cluster, por id()

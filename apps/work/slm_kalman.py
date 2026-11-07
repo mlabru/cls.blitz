@@ -23,6 +23,10 @@ slm_tracks_state.json.  Os NOMES dos atributos de _TKalman1D (x, v, p_xx,
 p_xv, p_vv, q_pos, q_vel, r) são, portanto, o formato do arquivo: renomear um
 deles quebra a leitura de estados já gravados.
 
+2026.nov  mlabru  filtro novo com variância da posição = r (era 1 grau², ~111 km)
+2026.nov  mlabru  nis (inovação normalizada, diagnóstico da associação); ruídos
+                  padrão lidos na criação do filtro (o slmReplay sobrescreve
+                  as constantes)
 2026.nov  mlabru  from_two_points (velocidade inicial pelo deslocamento dos dois
                   primeiros frames) e spawn_at (track filho herda a velocidade)
 2026.nov  mlabru  ruído de processo proporcional a dt (era somado uma vez por
@@ -60,8 +64,8 @@ CF_KALMAN_R = 1e-3
 # normal o filtro se comporta como antes do ruído passar a depender de dt
 CF_KALMAN_Q_REF_DT_H = 5.0 / 60.0
 
-# covariância inicial: posição pouco conhecida (1 grau²), velocidade quase nula
-CF_INITIAL_P_POSITION = 1.0
+# covariância inicial da velocidade ((graus/hora)², ~35 km/h de sigma); a da
+# posição é r, porque o filtro nasce numa posição medida (ver _TKalman1D.__init__)
 CF_INITIAL_P_VELOCITY = 0.1
 
 # < _TKalman1D >───────────────────────────────────────────────────────────────────────
@@ -90,27 +94,35 @@ class _TKalman1D:
     """
     # ─────────────────────────────────────────────────────────────────────────────────
     def __init__(self, x0: float, v0: float = 0.0,
-                 q_pos: float = CF_KALMAN_Q_POS, q_vel: float = CF_KALMAN_Q_VEL,
-                 r: float = CF_KALMAN_R):
+                 q_pos: float | None = None, q_vel: float | None = None,
+                 r: float | None = None):
         """
         cria o filtro numa posição conhecida.
 
+        [fix] os padrões (None) são lidos das constantes NA CRIAÇÃO, não na
+        definição da função: assim o slmReplay consegue trocar
+        CF_KALMAN_Q_POS/Q_VEL/R e o filtro novo usa o valor trocado.
+
         :param x0: posição inicial (graus)
         :param v0: velocidade inicial (graus/hora)
-        :param q_pos: ruído de processo da posição
-        :param q_vel: ruído de processo da velocidade
-        :param r: ruído de medição
+        :param q_pos: ruído de processo da posição (None = CF_KALMAN_Q_POS)
+        :param q_vel: ruído de processo da velocidade (None = CF_KALMAN_Q_VEL)
+        :param r: ruído de medição (None = CF_KALMAN_R)
         """
         self.x = x0
         self.v = v0
 
-        self.p_xx = CF_INITIAL_P_POSITION
+        self.q_pos = CF_KALMAN_Q_POS if q_pos is None else q_pos
+        self.q_vel = CF_KALMAN_Q_VEL if q_vel is None else q_vel
+        self.r = CF_KALMAN_R if r is None else r
+
+        # [fix] p_xx era CF_INITIAL_P_POSITION (1 grau², ~111 km de sigma): a
+        # 1a previsão de todo track novo saía com elipses de ~4,5 graus no render
+        # e puxava o E[z2] da verificação para baixo.  x0 é um centroide medido,
+        # então a variância da posição é a da medida
+        self.p_xx = self.r
         self.p_xv = 0.0
         self.p_vv = CF_INITIAL_P_VELOCITY
-
-        self.q_pos = q_pos
-        self.q_vel = q_vel
-        self.r = r
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def predict(self, ff_dt_h: float) -> None:
@@ -138,6 +150,22 @@ class _TKalman1D:
         self.p_xx = lf_new_p_xx
         self.p_xv = lf_new_p_xv
         self.p_vv = lf_new_p_vv
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    def normalized_innovation_sq(self, ff_measured_position: float) -> float:
+        """
+        inovação normalizada ao quadrado: (medida − previsão)² / (p_xx + r).
+        Chamar DEPOIS do predict e ANTES do update.
+
+        se o filtro está bem calibrado, a média é 1 por eixo (soma dos dois
+        eixos: 2, ver TKalmanTracker.nis).
+
+        :param ff_measured_position: posição medida (graus)
+        :returns: valor adimensional >= 0
+        """
+        lf_innovation = ff_measured_position - self.x
+
+        return lf_innovation * lf_innovation / (self.p_xx + self.r)
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def update(self, ff_measured_position: float) -> None:
@@ -276,6 +304,25 @@ class TKalmanTracker:
         """
         self._lat.update(ff_lat)
         self._lng.update(ff_lng)
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    def nis(self, ff_lat: float, ff_lng: float) -> float:
+        """
+        NIS (normalized innovation squared) da posição observada: a soma da
+        inovação normalizada dos dois eixos.  Chamar DEPOIS do predict e ANTES
+        do update (slm_track._continue_track).
+
+        [new] diagnóstico da calibração do Kalman: com Q e R coerentes com os
+        dados, o NIS segue uma qui-quadrado de 2 graus de liberdade -- média
+        2, 95% abaixo de 5,99.  Média bem acima de 2: o filtro é confiante
+        demais (aumentar Q ou R); bem abaixo: cauteloso demais.
+
+        :param ff_lat: latitude observada (graus)
+        :param ff_lng: longitude observada (graus)
+        :returns: NIS (adimensional, >= 0)
+        """
+        return (self._lat.normalized_innovation_sq(ff_lat) +
+                self._lng.normalized_innovation_sq(ff_lng))
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def predict(self, ff_dt_h: float) -> None:

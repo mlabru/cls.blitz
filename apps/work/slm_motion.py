@@ -22,6 +22,8 @@ movimento das células: velocidade, direção e previsão de posição.
       posições previstas para +10/+20/+30 min (CT_FORECAST_LEADS_MIN), com a
       incerteza 1-sigma do filtro de Kalman (slm_kalman).
 
+2026.nov  mlabru  parâmetros de algoritmo lidos na chamada, não na definição
+                  (padrão None): o slmReplay sobrescreve as constantes
 2026.nov  mlabru  [fix] extrapolate_path com ff_offset_h: horizontes contados do
                   instante do frame, não do instante médio da célula
 2026.nov  mlabru  [fix] elapsed_hours pelo sst.cell_time (era t_start, parado
@@ -134,7 +136,7 @@ def compute_speed_kmh(f_previous_cell: sst.TCell, f_current_cell: sst.TCell) -> 
     return lf_distance_km / lf_hours
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def compute_velocity_ema(flst_history: list, ff_alpha: float = CF_EMA_ALPHA) -> tuple:
+def compute_velocity_ema(flst_history: list, ff_alpha: float | None = None) -> tuple:
     """
     velocidade e direção suavizadas por média exponencial (EMA) sobre o
     histórico do track.
@@ -146,12 +148,15 @@ def compute_velocity_ema(flst_history: list, ff_alpha: float = CF_EMA_ALPHA) -> 
     Pares com intervalo de tempo não positivo são pulados (sem consumir peso).
 
     :param flst_history: lista de TCell, da mais antiga para a mais recente
-    :param ff_alpha: fator de suavização [0-1]
+    :param ff_alpha: fator de suavização [0-1] (None = CF_EMA_ALPHA)
     :returns: (velocidade em km/h, direção em graus [0, 360)); (0.0, 0.0) se
               houver menos de 2 células ou nenhum par válido
     """
     if len(flst_history) < 2:
         return 0.0, 0.0
+
+    if ff_alpha is None:
+        ff_alpha = CF_EMA_ALPHA
 
     lf_weighted_speed_sum = 0.0
     lf_weighted_sin_sum = 0.0
@@ -241,7 +246,7 @@ def kalman_velocity(f_tracker: klm.TKalmanTracker, ff_lat_deg: float) -> tuple:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def extrapolate_path(f_tracker: klm.TKalmanTracker,
-                     ft_leads_min: tuple = CT_FORECAST_LEADS_MIN,
+                     ft_leads_min: tuple | None = None,
                      ff_offset_h: float = 0.0) -> list:
     """
     trajetória prevista de uma célula, pelo filtro de Kalman do seu track.
@@ -257,12 +262,16 @@ def extrapolate_path(f_tracker: klm.TKalmanTracker,
 
     :param f_tracker: filtro de Kalman do track (não é alterado)
     :param ft_leads_min: horizontes, em minutos, contados do instante do frame
+                         (None = CT_FORECAST_LEADS_MIN)
     :param ff_offset_h: horas entre o estado do filtro e o instante do frame
                         (negativo conta como 0)
     :returns: lista de dicts {lead_min, lat, lng, lat_std, lng_std}, um por horizonte
     """
     llst_forecast = []
     lf_offset_h = max(ff_offset_h, 0.0)
+
+    if ft_leads_min is None:
+        ft_leads_min = CT_FORECAST_LEADS_MIN
 
     for li_lead_min in ft_leads_min:
         lf_lead_hours = li_lead_min / CF_MINUTES_PER_HOUR + lf_offset_h

@@ -13,6 +13,8 @@
 #
 # 2026.nov  mlabru  [fix] generate_map só marca o CSV como processado depois
 #                   do mapa (ou de "sem raios", rc 3): falha é retentada
+# 2026.nov  mlabru  run_slm_downloader passa -a (SLM_ARCHIVE); run_slm_tracker
+#                   passa --assoc-file/--frames-file (diagnóstico)
 # 2026.nov  mlabru  run_slm_tracker passa --verify-file (SLM_VERIFY_FILE)
 # 2026.out  mlabru  [fix] frames ordenados com sort -V (frame_10000 depois de
 #                   frame_9999); tracker recebe --tracks-file; get_state
@@ -160,8 +162,9 @@ update_metrics()
 # < programas Python >-----------------------------------------------------------------
 
 # -------------------------------------------------------------------------------------
-# baixa o snapshot da REDEMET e atualiza o CSV acumulado (slmDownloader.py);
-# stdout e stderr vão para logs/slmDownloader.log
+# baixa o snapshot da REDEMET e atualiza o CSV acumulado (slmDownloader.py)
+# e o arquivo diário dos raios (SLM_ARCHIVE); stdout e stderr vão para
+# logs/slmDownloader.log
 #
 # uso: run_slm_downloader
 # retorno: o código de saída do slmDownloader.py
@@ -171,7 +174,7 @@ run_slm_downloader()
     local li_rc=0
 
     python3 "${SLM_LIB_DIR}/apps/slmDownloader.py" -f "${SLM_RAW_FILE}" -s "${SLM_RAW}" \
-            >> "${SLM_LOGS}/slmDownloader.log" 2>&1 || li_rc=$?
+            -a "${SLM_ARCHIVE}" >> "${SLM_LOGS}/slmDownloader.log" 2>&1 || li_rc=$?
 
     return "${li_rc}"
 
@@ -202,7 +205,7 @@ run_slm_mapper()
 # O stdout do tracker é o contrato com o shell (linha "NEWEST_TS=<epoch>"
 # quando houve raios novos) e é repassado ao chamador; o stderr (o logging
 # do Python) vai para logs/slmTracker.log.  As previsões conferidas vão para
-# SLM_VERIFY_FILE
+# SLM_VERIFY_FILE e os diagnósticos para SLM_ASSOC_FILE/SLM_FRAMES_FILE
 #
 # uso: ls_output=$(run_slm_tracker <csv> <json_de_saída> <since_ts>)
 # retorno: o código de saída do slmTracker.py
@@ -217,6 +220,7 @@ run_slm_tracker()
     python3 "${SLM_LIB_DIR}/apps/slmTracker.py" --since-ts "${ls_since_ts}" \
             --tracks-file "${SLM_TRACKS_STATE_FILE}" \
             --verify-file "${SLM_VERIFY_FILE}" \
+            --assoc-file "${SLM_ASSOC_FILE}" --frames-file "${SLM_FRAMES_FILE}" \
             "${ls_csv}" "${ls_json}" 2>> "${SLM_LOGS}/slmTracker.log" || li_rc=$?
 
     return "${li_rc}"

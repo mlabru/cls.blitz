@@ -35,6 +35,16 @@ def test_kalman_tracker_update_and_predict_position():
     assert lng_std > 0.0
 
 
+def test_new_tracker_position_sigma_is_measurement_noise():
+    # o filtro nasce num centroide medido: sigma da posição = sqrt(r), não ~1 grau
+    kt = klm.TKalmanTracker(-23.0, -46.0)
+
+    _, _, lat_std, lng_std = kt.predict_position(0.0)
+
+    assert lat_std == pytest.approx(klm.CF_KALMAN_R ** 0.5)
+    assert lng_std == pytest.approx(klm.CF_KALMAN_R ** 0.5)
+
+
 def test_kalman_tracker_predict_position_does_not_mutate_state():
     kt = klm.TKalmanTracker(0.0, 0.0)
     kt.update(1.0, 1.0)
@@ -138,3 +148,42 @@ def test_spawn_at_inherits_velocity_and_covariance_not_position():
     assert parent.to_dict() == before                     # o pai não muda
     child.update(9.0, 9.0)
     assert parent.to_dict() == before                     # e não compartilha estado
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# NIS e ruídos lidos na criação (2026.nov)
+
+def test_nis_zero_at_predicted_position():
+    k = klm.TKalmanTracker(1.0, 2.0, ff_vlat=0.5, ff_vlng=-0.5)
+    k.predict(0.5)
+    lat, lng, _, _ = k.predict_position(0.0)
+
+    assert k.nis(lat, lng) == pytest.approx(0.0)
+
+
+def test_nis_one_sigma_offset_on_one_axis_is_one():
+    k = klm.TKalmanTracker(0.0, 0.0)
+    k.predict(1.0)
+    sigma_lat = (k._lat.p_xx + k._lat.r) ** 0.5
+
+    assert k.nis(sigma_lat, 0.0) == pytest.approx(1.0)
+    assert k.nis(sigma_lat, -((k._lng.p_xx + k._lng.r) ** 0.5)) == pytest.approx(2.0)
+
+
+def test_nis_does_not_change_state():
+    k = klm.TKalmanTracker(0.0, 0.0)
+    before = k.to_dict()
+
+    k.nis(1.0, 1.0)
+
+    assert k.to_dict() == before
+
+
+def test_noise_defaults_read_when_filter_is_created(monkeypatch):
+    monkeypatch.setattr(klm, "CF_KALMAN_R", 0.5)
+    monkeypatch.setattr(klm, "CF_KALMAN_Q_VEL", 0.25)
+
+    k = klm._TKalman1D(0.0)
+
+    assert (k.r, k.q_vel) == (0.5, 0.25)
+    assert klm._TKalman1D(0.0, r=0.1).r == 0.1

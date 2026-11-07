@@ -259,10 +259,13 @@ class TestMain:
         # argumentos de cada programa (contrato com os apps/*.py)
         ldct_args = {lt[0]: lt[2] for lt in _calls(lpth_proj) if "ffmpeg" != lt[0]}
         lpth_data = lpth_proj / "data"
-        assert f"-f slm_lightning.csv -s {lpth_data}/raw" == ldct_args["slmDownloader"]
+        assert (f"-f slm_lightning.csv -s {lpth_data}/raw "
+                f"-a {lpth_data}/archive") == ldct_args["slmDownloader"]
         assert ldct_args["slmMapper"].startswith(f"-s {lpth_data}/output -f {lpth_data}/temp/tmp.")
         assert (f"--since-ts 0 --tracks-file {lpth_data}/state/slm_tracks_state.json "
                 f"--verify-file {lpth_data}/state/slm_verification.csv "
+                f"--assoc-file {lpth_data}/state/slm_assoc.csv "
+                f"--frames-file {lpth_data}/state/slm_frames.csv "
                 f"{lpth_data}/raw/slm_lightning.csv "
                 f"{lpth_data}/temp/json/frame_0000.json") == ldct_args["slmTracker"]
         assert (f"{lpth_data}/temp/json/frame_0000.json "

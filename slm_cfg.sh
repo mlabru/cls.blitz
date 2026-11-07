@@ -13,6 +13,8 @@
 # sempre "source"ado, nunca executado -- não define "set -e": herda as
 # opções de shell de quem importa.
 #
+# 2026.nov  mlabru  SLM_ASSOC_FILE/SLM_FRAMES_FILE (diagnóstico do tracker) e
+#                   SLM_ARCHIVE (arquivo diário dos raios, para o slmReplay)
 # 2026.nov  mlabru  SLM_VERIFY_FILE (CSV de verificação, passado ao tracker)
 # 2026.out  mlabru  SLM_TRACKS_STATE_FILE explícito (passado ao tracker)
 # 2026.out  mlabru  - só cron: saem a FIFO tracker -> renderer, o sentinela
@@ -46,7 +48,11 @@ SLM_DATA="${SLM_PATH}/data"
 SLM_LOGS="${SLM_PATH}/logs"
 
 # raw: CSV baixado; state: locks e estado entre execuções;
-# temp: JSON/PNG por frame; output: produtos finais
+# temp: JSON/PNG por frame; output: produtos finais;
+# archive: raios de cada dia (slm_raw_AAAAMMDD.csv.gz), base do reprocessamento
+# para calibração (apps/slmReplay.py); o downloader cria o diretório e apaga
+# os dias além de CI_ARCHIVE_DAYS (slm_archive.py)
+SLM_ARCHIVE="${SLM_DATA}/archive"
 SLM_OUT="${SLM_DATA}/output"
 SLM_RAW="${SLM_DATA}/raw"
 SLM_STATE="${SLM_DATA}/state"
@@ -80,6 +86,12 @@ SLM_TRACKS_STATE_FILE="${SLM_STATE}/slm_tracks_state.json"
 # previsão conferida contra a célula observada; cresce por append e é
 # rotacionado pelo check_log_size do slm_run.sh (GI_LOG_MAX_SIZE)
 SLM_VERIFY_FILE="${SLM_STATE}/slm_verification.csv"
+
+# diagnóstico do tracker (--assoc-file/--frames-file): uma linha por célula
+# (associação: distância até a previsão, score, NIS) e uma por frame
+# (latência, ciclo de vida dos tracks).  Append e rotação como o de cima
+SLM_ASSOC_FILE="${SLM_STATE}/slm_assoc.csv"
+SLM_FRAMES_FILE="${SLM_STATE}/slm_frames.csv"
 
 # métricas (chave=valor) e o lock que serializa a escrita delas
 SLM_METRICS="${SLM_STATE}/.slm_metrics.txt"

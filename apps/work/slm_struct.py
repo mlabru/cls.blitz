@@ -14,6 +14,8 @@ estruturas de dados do modelo:
 atenção: este módulo é importado como "sst" em todo o projeto, nunca como
 "str" -- um bug antigo sombreava o builtin str.
 
+2026.nov  mlabru  TCell.assoc (diagnóstico da associação) e TStormTrack.end_reason
+                  (por que o track acabou); nenhum dos dois é persistido
 2026.nov  mlabru  [fix] TCell.t_ref e cell_time: relógio do tracking é a média
                   dos ts dos raios, não o primeiro raio da janela
 2026.nov  mlabru  TCell.parent_id e TStormTrack.parent_id (divisão de células)
@@ -67,6 +69,10 @@ class TCell:
     forecast_path: list = dataclasses.field(default_factory=list)
     # histórico curto do track (TCell anteriores), usado pelo render
     history: list = dataclasses.field(default_factory=list)
+    # [new] diagnóstico da associação deste frame (slm_track.update_tracks;
+    # gravado pelo slm_diag): kind ("continue", "two_point", "new", "split"),
+    # dt_min, dist_km, score, size_prev, nis.  Não vai para o estado
+    assoc: dict = dataclasses.field(default_factory=dict)
     # estatísticas de amplitude/polaridade/tipo (ver slmTracker.compute_cell_stats)
     max_amp: float = 0.0
     mean_amp: float = 0.0
@@ -184,6 +190,10 @@ class TStormTrack:
     # [new] previsões emitidas e ainda não verificadas (slm_verify): dicts com
     # issue_ts, lead_min, lat, lng e a posição de emissão lat0, lng0
     forecasts: list = dataclasses.field(default_factory=list)
+    # [new] por que o track foi desativado NESTE frame: "missed", "merged" ou
+    # "expired" ("" = ativo).  Não é persistido (tracks inativos não são
+    # gravados); serve à verificação (slm_verify.close_tracks) e ao slm_diag
+    end_reason: str = ""
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @property

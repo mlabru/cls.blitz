@@ -432,3 +432,87 @@ def test_process_verification_issue_ts_is_frame_time(tmp_path):
     tol = trkmod.vrf.CF_VERIFY_TOLERANCE_MIN * 60
     assert all(abs(float(r["verify_ts"]) - float(r["issue_ts"]) - 60 * int(r["lead_min"])) <= tol
                for r in data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# diagnóstico e previsões perdidas (2026.nov)
+
+def _read(path):
+    with open(path, newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def test_process_writes_association_and_frame_diagnostics(tmp_path):
+    n = trkmod.CI_MIN_PTS
+    files = {k: str(tmp_path / f"{k}.csv") for k in ("verify", "assoc", "frames")}
+    rows = []
+
+    for i, lng in enumerate((0.0, 0.05, 0.10)):
+        ts = 1000 + 300 * i
+        rows += [(ts, 0.0, lng)] * n
+        _write_csv(tmp_path / "raw.csv", rows)
+        trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "f.json"), ts - 1,
+                       str(tmp_path / "tracks.json"), files["verify"], files["assoc"],
+                       files["frames"], ff_run_ts=ts + 90.0)
+
+    assoc = _read(files["assoc"])
+    assert [r["kind"] for r in assoc] == ["new", "two_point", "continue"]
+    assert len({r["track_id"] for r in assoc}) == 1
+    assert assoc[2]["nis"] != "" and float(assoc[2]["dist_km"]) >= 0.0
+
+    frames = _read(files["frames"])
+    assert [float(r["latency_s"]) for r in frames] == [90.0, 90.0, 90.0]
+    assert [int(r["n_window_events"]) for r in frames] == [n, 2 * n, 3 * n]
+    assert [int(r["n_cells"]) for r in frames] == [1, 1, 1]
+
+
+def test_process_latency_defaults_to_wall_clock(tmp_path, monkeypatch):
+    monkeypatch.setattr(trkmod.time, "time", lambda: 5000.0)
+    frames_path = tmp_path / "frames.csv"
+    _write_csv(tmp_path / "raw.csv", [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS)
+
+    trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "f.json"), 0.0,
+                   str(tmp_path / "tracks.json"), fs_frames_file=str(frames_path))
+
+    assert float(_read(frames_path)[0]["latency_s"]) == 4000.0
+
+
+def test_process_reports_forecasts_of_expired_track(tmp_path):
+    verify_path = tmp_path / "verify.csv"
+    li_gap_s = int(trkmod.trk.CF_MAX_TRACK_GAP_MIN * 60)
+    n = trkmod.CI_MIN_PTS
+
+    _write_csv(tmp_path / "raw.csv", [(1000, 0.0, 0.0)] * n)
+    trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "f.json"), 0.0,
+                   str(tmp_path / "tracks.json"), str(verify_path))
+
+    # volta depois do limite: o track antigo expira com 3 previsões pendentes
+    ts2 = 1000 + li_gap_s + 60
+    _write_csv(tmp_path / "raw.csv", [(ts2, 1.0, 1.0)] * n)
+    trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "f.json"), 1000.0,
+                   str(tmp_path / "tracks.json"), str(verify_path))
+
+    rows = _read(verify_path)
+    assert [(r["lead_min"], r["status"]) for r in rows] == [("10", "expired"), ("20", "expired"),
+                                                            ("30", "expired")]
+    assert all(float(r["verify_ts"]) == ts2 for r in rows)
+
+
+def test_process_forecast_points_carry_sigma_to_pending(tmp_path):
+    _write_csv(tmp_path / "raw.csv", [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS)
+    trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "f.json"), 0.0,
+                   str(tmp_path / "tracks.json"))
+
+    pending = json.loads((tmp_path / "tracks.json").read_text())["tracks"][0]["forecasts"]
+
+    assert all(f["lat_std"] > 0.0 and f["lng_std"] > 0.0 for f in pending)
+
+
+def test_cluster_window_reads_window_at_call_time(monkeypatch):
+    events = ([_mk(0) for _ in range(trkmod.CI_MIN_PTS)] +
+              [_mk(600) for _ in range(trkmod.CI_MIN_PTS)])
+    monkeypatch.setattr(trkmod, "CI_WINDOW_MINUTES", 5)
+
+    cells = trkmod.cluster_window(events)
+
+    assert [c.size for c in cells] == [trkmod.CI_MIN_PTS]

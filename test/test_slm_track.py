@@ -1,3 +1,4 @@
+import copy
 import math
 
 import pytest
@@ -413,3 +414,121 @@ def test_parent_id_survives_save_and_load(tmp_path):
     loaded, _ = trk.load_tracks(str(path))
 
     assert loaded[0].parent_id == "A"
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# diagnóstico da associação e motivo do fim do track (2026.nov)
+
+def test_continue_diagnostics_measure_distance_to_prediction_and_nis():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.1, 300)], {0: 0})
+    # o filtro agora prevê 0.2 grau em 600 s; a célula veio 0.01 grau ao norte disso
+    predicted = kalman[tracks[0].id].predict_position(300 / 3600.0)
+    cell = _c(predicted[0] + 0.01, predicted[1], 600, size=12)
+
+    trk.update_tracks(tracks, kalman, [cell], {0: 0})
+
+    assoc = cell.assoc
+    assert assoc["kind"] == "continue"
+    assert assoc["dt_min"] == pytest.approx(5.0)
+    assert assoc["dist_km"] == pytest.approx(0.01 * 111.19, rel=0.01)
+    assert assoc["size_prev"] == 10
+    assert assoc["score"] == pytest.approx(trk.match_score(tracks[0].history[-2], cell,
+                                                           ff_dist_km=assoc["dist_km"]))
+    assert assoc["nis"] > 0.0
+
+
+def test_two_point_diagnostics_have_no_nis():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    cell = _c(0.0, 0.1, 300)
+
+    trk.update_tracks(tracks, kalman, [cell], {0: 0})
+
+    assert cell.assoc["kind"] == "two_point"
+    assert "nis" not in cell.assoc
+    # sem velocidade ainda, a previsão é a posição anterior: 0.1 grau
+    assert cell.assoc["dist_km"] == pytest.approx(0.1 * 111.19, rel=0.01)
+
+
+def test_nis_is_measured_before_the_update():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.1, 300)], {0: 0})
+    cell = _c(0.0, 0.25, 600)
+    reference = copy.deepcopy(kalman[tracks[0].id])
+    reference.predict(300 / 3600.0)
+
+    trk.update_tracks(tracks, kalman, [cell], {0: 0})
+
+    assert cell.assoc["nis"] == pytest.approx(reference.nis(0.0, 0.25))
+
+
+def test_new_cell_diagnostics_point_to_nearest_unmatched_track():
+    tracks, kalman = _two_tracks(60.0)                 # A em 0 km, B em 60 km
+    far_b = _c(0.0, 0.0, 300)                          # A continua; B fica sem par
+    newcomer = _c(0.0, 90.0 / 111.19, 300)             # 30 km de B, 90 de A
+
+    trk.update_tracks(tracks, kalman, [far_b, newcomer], {0: 0})
+
+    assert newcomer.assoc["kind"] == "new"
+    assert newcomer.assoc["dist_km"] == pytest.approx(30.0, rel=0.01)
+    assert newcomer.assoc["size_prev"] == 10
+    assert 0.0 < newcomer.assoc["score"] < 1.0
+
+
+def test_new_cell_without_candidates_has_only_kind():
+    cell = _c(0.0, 0.0, 0)
+
+    trk.update_tracks([], {}, [cell], {})
+
+    assert cell.assoc == {"kind": "new"}
+
+
+def test_split_child_diagnostics_kind():
+    _, _, _, child = _two_frames_split(25.0)
+
+    assert child.assoc["kind"] == "split"
+
+
+def test_end_reason_merged_missed_expired():
+    tracks, kalman = _two_tracks(25.0)
+    trk.update_tracks(tracks, kalman, [_c(0.0, 12.5 / 111.19, 300, size=20)], {0: 0})
+    assert tracks[1].end_reason == "merged"
+
+    far = trk.CF_SPLIT_MERGE_DIST_KM + 20.0
+    tracks, kalman = _two_tracks(far)
+    for i in range(trk.CI_MAX_MISSED_FRAMES):
+        trk.update_tracks(tracks, kalman, [_c(0.0, 0.0, 300 * (i + 1))], {0: 0})
+    assert tracks[1].end_reason == "missed"
+    assert tracks[0].end_reason == ""
+
+    stale = _track("stale", 0.0)
+    trk.expire_stale_tracks([stale], 10 * 3600.0)
+    assert stale.end_reason == "expired"
+
+
+def test_end_reason_is_not_persisted(tmp_path):
+    path = tmp_path / "tracks.json"
+    track = sst.TStormTrack(id="A", history=[_c(0.0, 0.0, 0)], end_reason="x")
+
+    trk.save_tracks(str(path), [track], {})
+    loaded, _ = trk.load_tracks(str(path))
+
+    assert loaded[0].end_reason == ""
+
+
+def test_tunables_are_read_at_call_time(monkeypatch):
+    # [fix] o slmReplay troca as constantes do módulo; o padrão não pode ter
+    # sido congelado na definição da função
+    track, cell = _size_track(100), _cell_at_km(80.0, 100)
+    assert trk.associate_cells([track], [cell]) == {0: 0}
+
+    monkeypatch.setattr(trk, "CF_MAX_DIST_KM", 50.0)
+    assert trk.associate_cells([track], [cell]) == {}
+
+    monkeypatch.setattr(trk, "CF_MAX_DIST_KM", 100.0)
+    monkeypatch.setattr(trk, "CF_MAX_MATCH_SCORE", 0.3)
+    assert trk.associate_cells([track], [cell]) == {}
+
+    monkeypatch.setattr(trk, "CF_MAX_TRACK_GAP_MIN", 1000.0)
+    stale = _track("stale", 0.0)
+    assert trk.expire_stale_tracks([stale], 10 * 3600.0) == 0

@@ -12,9 +12,9 @@ def _cell(track_id, t_start, lat=0.0, lng=0.0, forecast_path=None):
                      forecast_path=forecast_path or [])
 
 
-def _forecast(issue_ts, lead_min, lat=0.0, lng=0.0, lat0=0.0, lng0=0.0):
+def _forecast(issue_ts, lead_min, lat=0.0, lng=0.0, lat0=0.0, lng0=0.0, **std):
     return {"issue_ts": issue_ts, "lead_min": lead_min, "lat": lat, "lng": lng,
-            "lat0": lat0, "lng0": lng0}
+            "lat0": lat0, "lng0": lng0, **std}
 
 
 def test_register_cells_stores_forecasts_with_issue_position():
@@ -24,7 +24,7 @@ def test_register_cells_stores_forecasts_with_issue_position():
 
     vrf.register_cells([cell], [track])
 
-    assert track.forecasts == [_forecast(1000, 10, 1.1, 2.1, 1.0, 2.0)]
+    assert track.forecasts == [_forecast(1000, 10, 1.1, 2.1, 1.0, 2.0, lat_std=0.1, lng_std=0.1)]
 
 
 def test_verify_track_matches_within_tolerance_and_computes_errors():
@@ -44,14 +44,18 @@ def test_verify_track_matches_within_tolerance_and_computes_errors():
     assert track.forecasts == []
 
 
-def test_verify_track_keeps_future_and_drops_expired_forecasts():
+def test_verify_track_keeps_future_and_reports_expired_as_gap():
     future = _forecast(0, 30)
     expired = _forecast(0, 10)
     track = sst.TStormTrack(id="A", forecasts=[expired, future])
     # 20 min depois: +10 já passou (sem célula a tempo), +30 ainda vai valer
     cell = _cell("A", 1200)
 
-    assert vrf.verify_track(track, cell) == []
+    rows = vrf.verify_track(track, cell)
+
+    # [new] a perdida vira linha "gap" (antes sumia sem registro)
+    assert [(r["lead_min"], r["status"]) for r in rows] == [(10, "gap")]
+    assert (rows[0]["verify_ts"], rows[0]["error_km"], rows[0]["z2"]) == (1200, "", "")
     assert track.forecasts == [future]
 
 
@@ -143,3 +147,100 @@ def test_register_cells_without_issue_time_uses_cell_time():
     vrf.register_cells([cell], [track])
 
     assert track.forecasts[0]["issue_ts"] == 500.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# incerteza, z2 e previsões perdidas (2026.nov)
+
+def test_ok_row_has_sigma_in_km_and_z2():
+    # sigma de 0.01 grau nos dois eixos; erro de 0.02 grau em lat e 0.01 em lng
+    forecast = _forecast(0, 10, lat=0.0, lng=0.0, lat_std=0.01, lng_std=0.01)
+    track = sst.TStormTrack(id="A", forecasts=[forecast])
+
+    row = vrf.verify_track(track, _cell("A", 600, lat=0.02, lng=0.01))[0]
+
+    assert row["status"] == "ok"
+    assert row["std_lat_km"] == pytest.approx(1.11)
+    assert row["std_lng_km"] == pytest.approx(1.11)          # equador: cos = 1
+    assert row["z2"] == pytest.approx(4.0 + 1.0)
+
+
+def test_sigma_lng_in_km_shrinks_with_latitude():
+    forecast = _forecast(0, 10, lat=-60.0, lat_std=0.01, lng_std=0.01)
+    track = sst.TStormTrack(id="A", forecasts=[forecast])
+
+    row = vrf.verify_track(track, _cell("A", 600, lat=-60.0))[0]
+
+    assert row["std_lng_km"] == pytest.approx(0.555, abs=1e-3)   # 1.11 · cos 60°
+
+
+def test_forecast_from_old_state_has_empty_sigma_and_z2():
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+
+    row = vrf.verify_track(track, _cell("A", 600, lng=0.5))[0]
+
+    assert (row["std_lat_km"], row["std_lng_km"], row["z2"]) == ("", "", "")
+    assert row["error_km"] == pytest.approx(55.6, abs=0.1)
+
+
+def test_close_tracks_reports_pending_forecasts_of_ended_tracks():
+    merged = sst.TStormTrack(id="M", active=False, end_reason="merged",
+                             forecasts=[_forecast(0, 10), _forecast(0, 20)])
+    unknown = sst.TStormTrack(id="U", active=False, forecasts=[_forecast(0, 10)])
+    alive = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+
+    rows = vrf.close_tracks([merged, unknown, alive], 900.0)
+
+    assert [(r["track_id"], r["lead_min"], r["status"]) for r in rows] == [
+        ("M", 10, "merged"), ("M", 20, "merged"), ("U", 10, "ended")]
+    assert all(r["verify_ts"] == 900.0 and r["error_km"] == "" for r in rows)
+    assert merged.forecasts == [] and unknown.forecasts == []
+    assert len(alive.forecasts) == 1
+
+
+def test_mean_errors_ignores_lost_rows():
+    rows = [{"error_km": 2.0, "persist_km": 10.0, "status": "ok"},
+            {"error_km": "", "persist_km": "", "status": "gap"},
+            {"error_km": 4.0, "persist_km": 20.0}]
+
+    assert vrf.mean_errors(rows) == (3.0, 15.0)
+
+
+def test_append_rows_only_lost_rows(tmp_path):
+    path = tmp_path / "verify.csv"
+    rows = vrf.close_tracks([sst.TStormTrack(id="M", active=False, end_reason="missed",
+                                             forecasts=[_forecast(0, 10)])], 900.0)
+
+    vrf.append_rows(str(path), rows)
+
+    with open(path, newline="") as fh:
+        data = list(csv.DictReader(fh))
+    assert [r["status"] for r in data] == ["missed"]
+
+
+def test_append_rows_rotates_file_of_previous_layout(tmp_path):
+    path = tmp_path / "verify.csv"
+    old_header = ",".join(vrf.CLST_VERIFY_COLUMNS[:10])
+    path.write_text(old_header + "\n")
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+
+    vrf.append_rows(str(path), vrf.verify_track(track, _cell("A", 600)))
+
+    assert (tmp_path / "verify.csv.old").read_text() == old_header + "\n"
+    assert path.read_text().splitlines()[0] == ",".join(vrf.CLST_VERIFY_COLUMNS)
+
+
+def test_first_ten_columns_keep_previous_order():
+    # o awk do cabeçalho de slm_verify usa $4 (lead), $9 (erro) e $10 (persist.)
+    assert vrf.CLST_VERIFY_COLUMNS[3] == "lead_min"
+    assert vrf.CLST_VERIFY_COLUMNS[8:10] == ["error_km", "persist_km"]
+    assert vrf.CLST_VERIFY_COLUMNS[13] == "status"
+
+
+def test_tolerance_read_at_call_time(monkeypatch):
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+    monkeypatch.setattr(vrf, "CF_VERIFY_TOLERANCE_MIN", 10.0)
+
+    rows = vrf.verify_track(track, _cell("A", 600 + 9 * 60))
+
+    assert [r["status"] for r in rows] == ["ok"]

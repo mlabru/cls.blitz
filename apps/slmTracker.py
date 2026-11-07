@@ -22,18 +22,26 @@ fluxo (process):
   2) agrupa em células (cluster_window: janela + DBSCAN + estatísticas);
   3) tracking (slm_track: load_tracks, expire_stale_tracks, associate_cells,
      update_tracks);
-  4) verificação das previsões anteriores (slm_verify.verify_cells);
+  4) verificação das previsões anteriores (slm_verify.verify_cells) e das
+     que morreram com o track (slm_verify.close_tracks);
   5) previsão e trilha de cada célula (_attach_forecast_and_history) e registro
      das previsões novas para verificação futura (slm_verify.register_cells);
-  6) grava o JSON do frame, o estado dos tracks e as linhas de verificação.
+  6) grava o JSON do frame, o estado dos tracks, as linhas de verificação e
+     os diagnósticos (slm_diag: associação e resumo do frame).
 
 contrato com o shell (slm_common.sh): se houve frame novo, imprime no stdout
 uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
 
     python3 apps/slmTracker.py raw.csv frame.json --since-ts 1787010000 \
             --tracks-file data/state/slm_tracks_state.json \
-            --verify-file data/state/slm_verification.csv
+            --verify-file data/state/slm_verification.csv \
+            --assoc-file data/state/slm_assoc.csv --frames-file data/state/slm_frames.csv
 
+2026.nov  mlabru  instrumentação para calibrar: diagnóstico da associação
+                  (--assoc-file), resumo por frame com latência
+                  (--frames-file), previsões perdidas na verificação;
+                  process aceita o instante da rodada (ff_run_ts, slmReplay);
+                  janela lida na chamada (o slmReplay sobrescreve as constantes)
 2026.nov  mlabru  [fix] horizontes da previsão contados do instante do frame
 2026.nov  mlabru  [fix] t_ref da célula (média dos ts) e parent_id no JSON do frame
 2026.nov  mlabru  frame já aplicado ao estado (newest_ts) não é reaplicado
@@ -61,8 +69,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 
 # locals
+import work.slm_diag as dgn
 import work.slm_ioutil as iou
 import work.slm_motion as mtn
 import work.slm_spatial as spc
@@ -89,6 +99,10 @@ CS_DEFAULT_TRACKS_FILE = "./data/state/slm_tracks_state.json"
 
 # CSV de verificação padrão (o slm_common.sh pode informar outro)
 CS_DEFAULT_VERIFY_FILE = "./data/state/slm_verification.csv"
+
+# CSVs de diagnóstico padrão (o slm_common.sh pode informar outros)
+CS_DEFAULT_ASSOC_FILE = "./data/state/slm_assoc.csv"
+CS_DEFAULT_FRAMES_FILE = "./data/state/slm_frames.csv"
 
 # códigos de retorno
 CI_RC_OK = 0
@@ -186,7 +200,7 @@ def filter_new_events(flst_events: list, ff_since_ts: float) -> list:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def cluster_window(flst_events: list,
-                   ff_window_minutes: float = CI_WINDOW_MINUTES) -> list:
+                   ff_window_minutes: float | None = None) -> list:
     """
     agrupa em células os raios mais recentes.
 
@@ -200,11 +214,14 @@ def cluster_window(flst_events: list,
           célula corretos.
 
     :param flst_events: lista de TLightning (o CSV inteiro; a janela é recortada aqui)
-    :param ff_window_minutes: tamanho da janela, em minutos
+    :param ff_window_minutes: tamanho da janela, em minutos (None = CI_WINDOW_MINUTES)
     :returns: lista de TCell (ainda sem ID de track)
     """
     if not flst_events:
         return []
+
+    if ff_window_minutes is None:
+        ff_window_minutes = CI_WINDOW_MINUTES
 
     llst_window_events = _select_time_window(flst_events, ff_window_minutes)
 
@@ -369,7 +386,10 @@ def _cell_to_frame_dict(f_cell: sst.TCell) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────────────
 def process(fs_input_csv: str, fs_output_json: str,
             ff_since_ts: float, fs_tracks_file: str,
-            fs_verify_file: str | None = None) -> float | None:
+            fs_verify_file: str | None = None,
+            fs_assoc_file: str | None = None,
+            fs_frames_file: str | None = None,
+            ff_run_ts: float | None = None) -> float | None:
     """
     gera um frame completo (ver o fluxo no cabeçalho do módulo).
 
@@ -378,6 +398,10 @@ def process(fs_input_csv: str, fs_output_json: str,
     :param ff_since_ts: só eventos com ts maior que este entram (epoch UTC)
     :param fs_tracks_file: arquivo de estado dos tracks entre execuções
     :param fs_verify_file: CSV de verificação das previsões; None = não grava
+    :param fs_assoc_file: CSV de diagnóstico da associação; None = não grava
+    :param fs_frames_file: CSV de resumo por frame; None = não grava
+    :param ff_run_ts: instante da rodada, para a latência (None = agora;
+                      o slmReplay passa o instante simulado)
     :returns: ts do evento novo mais recente; None se não houve frame
               (sem eventos, sem eventos novos ou sem células); o ts do
               último frame aplicado, se o shell estiver atrasado (_catch_up_ts)
@@ -406,12 +430,18 @@ def process(fs_input_csv: str, fs_output_json: str,
         return None
 
     lf_newest_ts = llst_all_events[-1].ts
+    lf_run_ts = time.time() if ff_run_ts is None else ff_run_ts
+
+    M_LOG.info("latência do frame: %.0f s (rodada − raio mais recente).",
+               lf_run_ts - lf_newest_ts)
 
     llst_tracks, ldct_kalman_states = _track_cells(llst_cells, fs_tracks_file, lf_newest_ts)
 
     # verifica as previsões antigas contra as células de agora e só DEPOIS
-    # registra as novas (senão a previsão seria testada contra a própria célula)
-    llst_verify_rows = vrf.verify_cells(llst_cells, llst_tracks)
+    # registra as novas (senão a previsão seria testada contra a própria célula);
+    # as dos tracks que acabaram neste frame viram linhas "perdidas"
+    llst_verify_rows = (vrf.verify_cells(llst_cells, llst_tracks) +
+                        vrf.close_tracks(llst_tracks, lf_newest_ts))
 
     _attach_forecast_and_history(llst_cells, llst_tracks, ldct_kalman_states, lf_newest_ts)
 
@@ -430,6 +460,9 @@ def process(fs_input_csv: str, fs_output_json: str,
     # se perdem (as previsões já saíram do estado), mas nunca se duplicam
     if fs_verify_file:
         vrf.append_rows(fs_verify_file, llst_verify_rows)
+
+    _append_diagnostics(fs_assoc_file, fs_frames_file, lf_newest_ts, lf_run_ts,
+                        _count_window_events(llst_all_events), llst_cells, llst_tracks)
 
     M_LOG.info("frame exportado para %s (%d células).", fs_output_json, len(llst_cells))
 
@@ -553,6 +586,43 @@ def _attach_forecast_and_history(flst_cells: list, flst_tracks: list,
             l_cell.history = [sst.cell_to_dict(l_history_cell)
                               for l_history_cell in l_track.history]
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _count_window_events(flst_events: list) -> int:
+    """
+    quantos raios entraram na janela de agrupamento (diagnóstico: a fração
+    que virou célula mede o quanto CF_EPS_KM/CI_MIN_PTS descartam como ruído).
+
+    :param flst_events: todos os eventos, em ordem de ts (não vazia)
+    :returns: raios na janela de CI_WINDOW_MINUTES
+    """
+    return len(_select_time_window(flst_events, CI_WINDOW_MINUTES))
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _append_diagnostics(fs_assoc_file: str | None, fs_frames_file: str | None,
+                        ff_frame_ts: float, ff_run_ts: float, fi_window_events: int,
+                        flst_cells: list, flst_tracks: list) -> None:
+    """
+    grava os diagnósticos do frame (slm_diag).  Depois do estado, como a
+    verificação: se o processo morrer antes, as linhas se perdem, mas nunca
+    se duplicam.
+
+    :param fs_assoc_file: CSV de associação; None/vazio = não grava
+    :param fs_frames_file: CSV de frames; None/vazio = não grava
+    :param ff_frame_ts: instante do frame
+    :param ff_run_ts: instante da rodada
+    :param fi_window_events: raios na janela
+    :param flst_cells: células do frame (com assoc)
+    :param flst_tracks: tracks depois de update_tracks
+    """
+    if fs_assoc_file:
+        dgn.append(fs_assoc_file, dgn.CLST_ASSOC_COLUMNS,
+                   dgn.association_rows(ff_frame_ts, flst_cells))
+
+    if fs_frames_file:
+        dgn.append(fs_frames_file, dgn.CLST_FRAME_COLUMNS,
+                   [dgn.frame_row(ff_frame_ts, ff_run_ts, fi_window_events,
+                                  flst_cells, flst_tracks)])
+
 # ═════════════════════════════════════════════════════════════════════════════════════
 # programa
 # ═════════════════════════════════════════════════════════════════════════════════════
@@ -564,7 +634,7 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
 
     :param flst_argv: argumentos (None = sys.argv[1:])
     :returns: namespace com input_csv, output_json, since_ts (float >= 0),
-              tracks_file e verify_file
+              tracks_file, verify_file, assoc_file e frames_file
     """
     l_parser = argparse.ArgumentParser(
                    description="Simple Lightning Model — nowcasting incremental")
@@ -581,6 +651,12 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
     l_parser.add_argument("--verify-file",
                           help="CSV de verificação das previsões (acrescentado a cada frame)",
                           default=CS_DEFAULT_VERIFY_FILE)
+    l_parser.add_argument("--assoc-file",
+                          help="CSV de diagnóstico da associação (uma linha por célula)",
+                          default=CS_DEFAULT_ASSOC_FILE)
+    l_parser.add_argument("--frames-file",
+                          help="CSV de resumo por frame (latência, ciclo de vida dos tracks)",
+                          default=CS_DEFAULT_FRAMES_FILE)
 
     l_args = l_parser.parse_args(flst_argv)
 
@@ -603,7 +679,8 @@ def main(flst_argv: list | None = None) -> int:
     l_args = _parse_args(flst_argv)
 
     lf_newest_ts = process(l_args.input_csv, l_args.output_json,
-                           l_args.since_ts, l_args.tracks_file, l_args.verify_file)
+                           l_args.since_ts, l_args.tracks_file, l_args.verify_file,
+                           l_args.assoc_file, l_args.frames_file)
 
     if lf_newest_ts is not None:
         # [doc] "NEWEST_TS=<ts>" é um contrato entre processos, não só uma
