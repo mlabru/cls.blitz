@@ -86,3 +86,12 @@ def test_kalman_velocity_longitude_shrinks_with_latitude():
 
 def test_kalman_velocity_stopped_filter():
     assert mtn.kalman_velocity(klm.TKalmanTracker(0.0, 0.0), 0.0) == (0.0, 0.0)
+
+
+def test_elapsed_hours_uses_mean_time_not_first_strike():
+    # [fix] com a janela fixa, o primeiro raio (t_start) fica parado enquanto a
+    # célula é mais nova que a janela; o instante médio anda
+    prev = sst.TCell(t_start=0, t_ref=60.0)
+    curr = sst.TCell(t_start=0, t_ref=60.0 + 1800.0)
+
+    assert mtn.elapsed_hours(prev, curr) == pytest.approx(0.5)

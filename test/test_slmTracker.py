@@ -313,3 +313,78 @@ def test_process_state_ahead_but_no_cells_still_catches_up(tmp_path):
     newest, _ = _run(tmp_path, rows, since_ts=0)
 
     assert _run(tmp_path, [(900, 0.0, 0.0)], since_ts=500)[0] == newest
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# relógio pela média dos ts, divisão e fusão ponta a ponta (2026.nov)
+
+def test_build_cell_t_ref_is_mean_time():
+    cells = trkmod.cluster_window([sst.TLightning(ts=t, lat=0.0, lng=0.0)
+                                   for t in [0] * 5 + [600] * 5])
+
+    assert cells[0].t_start == 0
+    assert cells[0].t_ref == pytest.approx(300.0)
+
+
+def test_export_frame_has_parent_id_and_t_ref(tmp_path):
+    out = tmp_path / "f.json"
+
+    trkmod.export_frame([sst.TCell(id="b", parent_id="a", t_ref=12.5)], str(out))
+
+    data = json.loads(out.read_text())[0]
+    assert (data["parent_id"], data["t_ref"]) == ("a", 12.5)
+
+
+def test_process_moving_cell_has_speed_on_second_frame(tmp_path):
+    # [fix] com a janela fixa, os dois frames têm o mesmo primeiro raio
+    # (t_start); pelo t_start o dt era 0 e a célula ficava parada por 20 min
+    n = trkmod.CI_MIN_PTS
+    rows = [(1000, 0.0, 0.0)] * n
+    newest, _ = _run(tmp_path, rows, since_ts=0)
+
+    rows += [(1300, 0.0, 0.05)] * n                 # 0.05 grau a leste em 5 min
+    _, frame = _run(tmp_path, rows, since_ts=newest, name="frame2.json")
+
+    # a média de posição anda metade (0.025 grau) em metade do tempo (150 s):
+    # a velocidade estimada é a real, 0.05 grau em 5 min
+    assert frame[0]["t_ref"] == pytest.approx(1150.0)
+    assert frame[0]["speed_kmh"] == pytest.approx(0.05 * 111.0 * 12, rel=0.01)
+    assert frame[0]["direction_deg"] == pytest.approx(90.0, abs=1e-6)
+
+
+def _frames(tmp_path, frames):
+    """um CSV por frame (sem janela compartilhada), estado e verificação em comum"""
+    out = []
+    for i, rows in enumerate(frames):
+        csv_path = tmp_path / f"raw{i}.csv"
+        _write_csv(csv_path, rows)
+        json_path = tmp_path / f"f{i}.json"
+        trkmod.process(str(csv_path), str(json_path), 0.0, str(tmp_path / "tracks.json"))
+        out.append(json.loads(json_path.read_text()))
+    return out
+
+
+def test_process_split_creates_child_track(tmp_path):
+    n = trkmod.CI_MIN_PTS
+    lng_child = 25.0 / 111.19                       # 25 km: dois clusters (eps 12 km)
+
+    f0, f1 = _frames(tmp_path, [[(1000, 0.0, 0.0)] * n,
+                                [(1300, 0.0, 0.0)] * n + [(1300, 0.0, lng_child)] * n])
+
+    parent_id = f0[0]["id"]
+    by_parent = {c["parent_id"]: c for c in f1}
+    assert by_parent[""]["id"] == parent_id
+    assert by_parent[parent_id]["id"] != parent_id
+
+
+def test_process_merge_drops_absorbed_track(tmp_path):
+    n = trkmod.CI_MIN_PTS
+    lng_b = 25.0 / 111.19
+
+    f0, f1 = _frames(tmp_path, [[(1000, 0.0, 0.0)] * n + [(1000, 0.0, lng_b)] * n,
+                                [(1300, 0.0, lng_b / 2)] * (2 * n)])
+
+    assert len(f0) == 2 and len(f1) == 1
+    assert f1[0]["id"] in {c["id"] for c in f0}
+    state = json.loads((tmp_path / "tracks.json").read_text())
+    assert [t["id"] for t in state["tracks"]] == [f1[0]["id"]]   # o absorvido saiu na hora

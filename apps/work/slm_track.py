@@ -20,6 +20,9 @@ acompanhamento (tracking) das células convectivas de um frame para o outro.
 fluxo de um frame (chamado por slmTracker.process):
   load_tracks -> expire_stale_tracks -> associate_cells -> update_tracks -> save_tracks
 
+2026.nov  mlabru  divisão (track filho com parent_id e a velocidade do pai) e
+                  fusão (track absorvido desativado na hora); velocidade
+                  inicial do Kalman pelos dois primeiros frames
 2026.nov  mlabru  newest_ts no estado (load_applied_ts): frame não é reaplicado
                   se o shell morrer antes de gravar .slm_last_ts
 2026.nov  mlabru  corte explícito de score (CF_MAX_MATCH_SCORE) na associação
@@ -70,6 +73,19 @@ CI_MAX_HISTORY = 12
 
 # frames seguidos sem associação antes de desativar o track
 CI_MAX_MISSED_FRAMES = 3
+
+# divisão/fusão (update_tracks): distância (km) entre uma célula sem par e a
+# célula atual de um track que continuou (divisão), ou entre a posição
+# prevista de um track sem par e a célula que continuou outro track (fusão).
+# Da ordem de 3x o eps do DBSCAN (12 km): fragmentos de uma mesma tempestade
+CF_SPLIT_MERGE_DIST_KM = 40.0
+
+# intervalo mínimo (minutos) entre as duas primeiras células de um track para
+# iniciar a velocidade do Kalman pelo deslocamento (klm.from_two_points);
+# abaixo disso o deslocamento é quase só ruído do centroide.  2 min, não 5:
+# enquanto a célula é mais nova que a janela de 20 min, o instante médio dos
+# raios (sst.cell_time) anda só ~2,5 min por frame de 5 min
+CF_MIN_TWO_POINT_DT_MIN = 2.0
 
 # minutos sem raio (desde o t_end da última célula) antes de expirar o track,
 # conte ou não frames perdidos -- cobre o tracker parado ou rodadas sem célula
@@ -389,9 +405,21 @@ def update_tracks(flst_tracks: list, ldct_kalman_states: dict,
     passo a passo:
       1. célula associada a um track: continua aquele track
          (_continue_track: movimento, histórico, idade, Kalman);
-      2. célula sem associação: abre um track novo (_start_new_track);
-      3. track ativo que não recebeu célula neste frame: conta um frame
-         perdido e é desativado após CI_MAX_MISSED_FRAMES (_count_missed_frame).
+      2. célula sem associação: abre um track novo (_start_new_track); se
+         estiver a até CF_SPLIT_MERGE_DIST_KM da célula atual de um track que
+         acabou de continuar, é uma DIVISÃO: o novo track é filho dele
+         (parent_id) e herda a velocidade (_split_parent);
+      3. track ativo que não recebeu célula neste frame: se a posição prevista
+         dele cai a até CF_SPLIT_MERGE_DIST_KM de uma célula que continuou
+         outro track, é uma FUSÃO e ele é desativado na hora (_merge_target);
+         senão conta um frame perdido e é desativado após
+         CI_MAX_MISSED_FRAMES (_count_missed_frame).
+
+    [new] divisão e fusão: o algoritmo húngaro é um-para-um, então numa
+    divisão um fragmento abria um track sem parentesco e com velocidade zero,
+    e numa fusão o track absorvido ficava 3 frames como fantasma.  As
+    continuações (passo 1) vêm todas antes, para o filho copiar o Kalman do
+    pai já atualizado neste frame.
 
     as listas/dicts recebidos são ALTERADOS e também devolvidos.
 
@@ -404,13 +432,19 @@ def update_tracks(flst_tracks: list, ldct_kalman_states: dict,
     # tracks criados neste frame entram no fim da lista e não contam frame perdido
     li_existing_track_count = len(flst_tracks)
 
+    llst_continued_tracks = []
+
+    for li_cell_index, l_track_index in sorted(fdct_association.items()):
+        l_track = flst_tracks[l_track_index]
+        _continue_track(l_track, flst_cells_curr[li_cell_index], ldct_kalman_states)
+        llst_continued_tracks.append(l_track)
+
     for li_cell_index, l_cell in enumerate(flst_cells_curr):
         if li_cell_index in fdct_association:
-            l_track = flst_tracks[fdct_association[li_cell_index]]
-            _continue_track(l_track, l_cell, ldct_kalman_states)
+            continue
 
-        else:
-            _start_new_track(l_cell, flst_tracks, ldct_kalman_states)
+        l_parent = _split_parent(l_cell, llst_continued_tracks)
+        _start_new_track(l_cell, flst_tracks, ldct_kalman_states, l_parent)
 
     lset_matched_track_indexes = set(fdct_association.values())
 
@@ -418,6 +452,12 @@ def update_tracks(flst_tracks: list, ldct_kalman_states: dict,
         l_track = flst_tracks[li_track_index]
 
         if not l_track.active or li_track_index in lset_matched_track_indexes:
+            continue
+
+        l_target = _merge_target(l_track, llst_continued_tracks, ldct_kalman_states)
+
+        if l_target is not None:
+            _merge_track(l_track, l_target)
             continue
 
         _count_missed_frame(l_track)
@@ -434,7 +474,9 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
       1. a célula recebe o ID do track e entra no histórico (limitado a
          CI_MAX_HISTORY);
       2. idade do track cresce e o contador de frames perdidos zera;
-      3. Kalman: predict até o instante da célula, depois update com o centroide;
+      3. Kalman: predict até o instante da célula, depois update com o centroide
+         -- ou, na segunda célula de um track que não veio de divisão,
+         reinício pelos dois pontos (_needs_two_point_init);
       4. velocidade/direção da célula = as do Kalman (mtn.kalman_velocity), a
          mesma estimativa que o cone de previsão usa.
 
@@ -446,6 +488,7 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     l_previous_cell = f_track.last_cell
 
     f_cell.id = f_track.id
+    f_cell.parent_id = f_track.parent_id
 
     f_track.history.append(f_cell)
 
@@ -458,31 +501,136 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     f_track.age_minutes += lf_elapsed_hours * mtn.CF_MINUTES_PER_HOUR
     f_track.missed_frames = 0
 
-    # o filtro de Kalman exige o ciclo predict -> update a cada frame
     l_kalman = fdct_kalman_states[f_cell.id]
-    l_kalman.predict(lf_elapsed_hours)
-    l_kalman.update(f_cell.centroid[0], f_cell.centroid[1])
+
+    if _needs_two_point_init(f_track, lf_elapsed_hours):
+        l_kalman = klm.TKalmanTracker.from_two_points(l_previous_cell.centroid,
+                                                      f_cell.centroid, lf_elapsed_hours)
+        fdct_kalman_states[f_cell.id] = l_kalman
+
+    else:
+        # o filtro de Kalman exige o ciclo predict -> update a cada frame
+        l_kalman.predict(lf_elapsed_hours)
+        l_kalman.update(f_cell.centroid[0], f_cell.centroid[1])
 
     # [fix] uma só velocidade: antes era a EMA dos centroides (seta) contra o
     # Kalman (cone), que podiam divergir
     f_cell.speed_kmh, f_cell.direction_deg = mtn.kalman_velocity(l_kalman, f_cell.centroid[0])
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _start_new_track(f_cell: sst.TCell, flst_tracks: list, fdct_kalman_states: dict) -> None:
+def _needs_two_point_init(f_track: sst.TStormTrack, ff_elapsed_hours: float) -> bool:
     """
-    abre um track novo a partir de uma célula sem associação: ID novo, a
-    célula como primeiro elemento do histórico e um Kalman na posição dela
-    com velocidade zero.
+    a célula que acabou de entrar é a segunda do track, e dá para iniciar a
+    velocidade do Kalman pelo deslocamento entre as duas?
 
-    :param f_cell: célula do frame atual (recebe o ID novo)
+    não vale para track filho de divisão (já herdou a velocidade do pai) nem
+    com intervalo menor que CF_MIN_TWO_POINT_DT_MIN (o deslocamento seria
+    quase só ruído); nesses casos o filtro segue o ciclo predict -> update.
+
+    :param f_track: track, já com a célula nova no histórico
+    :param ff_elapsed_hours: horas entre a célula anterior e a nova
+    :returns: True se deve reiniciar com klm.TKalmanTracker.from_two_points
+    """
+    if 2 != len(f_track.history) or f_track.parent_id:
+        return False
+
+    return ff_elapsed_hours * mtn.CF_MINUTES_PER_HOUR >= CF_MIN_TWO_POINT_DT_MIN
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _start_new_track(f_cell: sst.TCell, flst_tracks: list, fdct_kalman_states: dict,
+                     f_parent: sst.TStormTrack | None = None) -> None:
+    """
+    abre um track novo a partir de uma célula sem associação: ID novo e a
+    célula como primeiro elemento do histórico.  O Kalman nasce na posição
+    dela com velocidade zero -- ou, se for filho de divisão (f_parent), com a
+    velocidade e as covariâncias do pai (TKalmanTracker.spawn_at).
+
+    :param f_cell: célula do frame atual (recebe o ID novo e o parent_id)
     :param flst_tracks: lista de tracks (o novo é acrescentado no fim)
     :param fdct_kalman_states: {id do track: TKalmanTracker} (recebe o novo)
+    :param f_parent: track de onde a célula se dividiu; None = nasceu sozinha
     """
     f_cell.id = generate_track_id()
+    f_cell.parent_id = f_parent.id if f_parent is not None else ""
 
-    flst_tracks.append(sst.TStormTrack(id=f_cell.id, history=[f_cell]))
+    flst_tracks.append(sst.TStormTrack(id=f_cell.id, history=[f_cell],
+                                       parent_id=f_cell.parent_id))
 
-    fdct_kalman_states[f_cell.id] = klm.TKalmanTracker(f_cell.centroid[0], f_cell.centroid[1])
+    if f_parent is None:
+        fdct_kalman_states[f_cell.id] = klm.TKalmanTracker(f_cell.centroid[0], f_cell.centroid[1])
+        return
+
+    fdct_kalman_states[f_cell.id] = fdct_kalman_states[f_parent.id].spawn_at(f_cell.centroid[0],
+                                                                            f_cell.centroid[1])
+
+    M_LOG.info("divisão: track %s nasceu de %s.", f_cell.id, f_parent.id)
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _split_parent(f_cell: sst.TCell, flst_continued_tracks: list,
+                  ff_max_dist_km: float = CF_SPLIT_MERGE_DIST_KM) -> sst.TStormTrack | None:
+    """
+    de que track esta célula sem par se dividiu: o que continuou neste frame
+    com a célula atual mais próxima dela, a até ff_max_dist_km.
+
+    :param f_cell: célula do frame atual sem associação
+    :param flst_continued_tracks: tracks que receberam célula neste frame
+    :param ff_max_dist_km: distância máxima entre as duas células
+    :returns: o track pai, ou None se não houver nenhum perto
+    """
+    l_parent = None
+    lf_best_km = ff_max_dist_km
+
+    for l_track in flst_continued_tracks:
+        lt_fragment = l_track.last_cell.centroid
+        lf_distance_km = spc.haversine_km(lt_fragment[0], lt_fragment[1],
+                                          f_cell.centroid[0], f_cell.centroid[1])
+
+        if lf_distance_km <= lf_best_km:
+            l_parent, lf_best_km = l_track, lf_distance_km
+
+    return l_parent
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _merge_target(f_track: sst.TStormTrack, flst_continued_tracks: list,
+                  fdct_kalman_states: dict,
+                  ff_max_dist_km: float = CF_SPLIT_MERGE_DIST_KM) -> sst.TStormTrack | None:
+    """
+    em que track este track sem par se fundiu: o que continuou neste frame
+    com a célula mais próxima da posição prevista dele, a até ff_max_dist_km.
+
+    :param f_track: track ativo que não recebeu célula
+    :param flst_continued_tracks: tracks que receberam célula neste frame
+    :param fdct_kalman_states: {id do track: TKalmanTracker}
+    :param ff_max_dist_km: distância máxima entre a previsão e a célula
+    :returns: o track que o absorveu, ou None se não houver nenhum perto
+    """
+    l_target = None
+    lf_best_km = ff_max_dist_km
+    l_kalman = fdct_kalman_states.get(f_track.id)
+
+    for l_other in flst_continued_tracks:
+        l_cell = l_other.last_cell
+        lf_ref_lat, lf_ref_lng = _reference_position(f_track.last_cell, l_cell, l_kalman)
+        lf_distance_km = spc.haversine_km(lf_ref_lat, lf_ref_lng,
+                                          l_cell.centroid[0], l_cell.centroid[1])
+
+        if lf_distance_km <= lf_best_km:
+            l_target, lf_best_km = l_other, lf_distance_km
+
+    return l_target
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _merge_track(f_track: sst.TStormTrack, f_target: sst.TStormTrack) -> None:
+    """
+    desativa um track que se fundiu em outro (não fica como fantasma
+    contando frames perdidos).
+
+    :param f_track: track absorvido (ALTERADO)
+    :param f_target: track que o absorveu
+    """
+    f_track.active = False
+
+    M_LOG.info("fusão: track %s absorvido por %s.", f_track.id, f_target.id)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _count_missed_frame(f_track: sst.TStormTrack) -> None:
@@ -624,8 +772,9 @@ def _track_from_dict(fdct_track: dict) -> sst.TStormTrack:
                            active=fdct_track["active"],
                            history=[sst.cell_from_dict(ldct_cell)
                                     for ldct_cell in fdct_track["history"]],
-                           # [fix] estado gravado antes de 2026.nov não tem a chave
-                           forecasts=fdct_track.get("forecasts", []))
+                           # [fix] estado gravado antes de 2026.nov não tem as chaves
+                           forecasts=fdct_track.get("forecasts", []),
+                           parent_id=fdct_track.get("parent_id", ""))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict,
@@ -695,6 +844,7 @@ def _track_to_dict(f_track: sst.TStormTrack) -> dict:
         "active":        f_track.active,
         "history":       [sst.cell_to_dict(l_cell) for l_cell in f_track.history],
         "forecasts":     f_track.forecasts,
+        "parent_id":     f_track.parent_id,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────────────

@@ -35,3 +35,27 @@ def test_storm_track_last_cell_returns_most_recent():
     track = sst.TStormTrack(id="t1", history=[c1, c2])
 
     assert track.last_cell is c2
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# t_ref e cell_time (2026.nov)
+
+def test_cell_time_prefers_t_ref():
+    assert sst.cell_time(sst.TCell(t_start=100, t_ref=250.0)) == 250.0
+    assert sst.cell_time(sst.TCell(t_start=100)) == 100
+
+
+def test_cell_dict_round_trip_keeps_t_ref():
+    cell = sst.TCell(id="a", centroid=(1.0, 2.0), size=3, t_start=100, t_end=300, t_ref=200.0)
+
+    assert sst.cell_from_dict(sst.cell_to_dict(cell)).t_ref == 200.0
+
+
+def test_cell_from_dict_old_state_without_t_ref():
+    data = sst.cell_to_dict(sst.TCell(id="a", t_start=100, t_end=300))
+    del data["t_ref"]
+
+    cell = sst.cell_from_dict(data)
+
+    assert cell.t_ref == 0.0
+    assert sst.cell_time(cell) == 100

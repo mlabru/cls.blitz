@@ -20,9 +20,10 @@ como funciona (chamado por slmTracker.process a cada frame):
      como pendentes no track (TStormTrack.forecasts, persistido com o estado);
   3) append_rows: as linhas vão para o CSV de verificação.
 
-o relógio é o mesmo de todo o tracking: TCell.t_start (o dt do Kalman e de
-elapsed_hours), então a previsão emitida na célula de t_start = T com lead L
-vale para a célula com t_start ≈ T + L.
+o relógio é o mesmo de todo o tracking: sst.cell_time (o instante médio dos
+raios da célula; o dt do Kalman e de elapsed_hours), então a previsão
+emitida na célula de instante T com lead L vale para a célula de instante
+≈ T + L.
 
 cada linha traz também o erro da PERSISTÊNCIA (supor que a célula ficou
 parada na posição de emissão): a previsão só tem valor se errar menos que ela.
@@ -36,6 +37,7 @@ médio por lead, previsão x persistência), sem dependências:
              END {for (l in n) printf "%s min: %.1f km (persist. %.1f km, n=%d)\n",
                                       l, e[l]/n[l], p[l]/n[l], n[l]}' slm_verification.csv
 
+2026.nov  mlabru  [fix] relógio pelo sst.cell_time (era t_start)
 2026.nov  mlabru  initial version
 """
 # < imports >──────────────────────────────────────────────────────────────────────────
@@ -120,16 +122,17 @@ def verify_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     :returns: linhas de verificação deste track
     """
     lf_tolerance_s = ff_tolerance_min * 60.0
+    lf_cell_ts = sst.cell_time(f_cell)
     llst_rows = []
     llst_pending = []
 
     for ldct_forecast in f_track.forecasts:
         lf_valid_ts = ldct_forecast["issue_ts"] + ldct_forecast["lead_min"] * 60.0
 
-        if abs(lf_valid_ts - f_cell.t_start) <= lf_tolerance_s:
+        if abs(lf_valid_ts - lf_cell_ts) <= lf_tolerance_s:
             llst_rows.append(_verification_row(f_track.id, ldct_forecast, f_cell))
 
-        elif lf_valid_ts > f_cell.t_start:
+        elif lf_valid_ts > lf_cell_ts:
             llst_pending.append(ldct_forecast)
 
     f_track.forecasts = llst_pending
@@ -155,7 +158,7 @@ def _verification_row(fs_track_id: str, fdct_forecast: dict, f_cell: sst.TCell) 
                                      lf_obs_lat, lf_obs_lng)
 
     return {
-        "verify_ts":  f_cell.t_start,
+        "verify_ts":  sst.cell_time(f_cell),
         "track_id":   fs_track_id,
         "issue_ts":   fdct_forecast["issue_ts"],
         "lead_min":   fdct_forecast["lead_min"],
@@ -200,7 +203,7 @@ def _pending_forecasts(f_cell: sst.TCell) -> list:
     """
     lf_lat0, lf_lng0 = f_cell.centroid
 
-    return [{"issue_ts": f_cell.t_start,
+    return [{"issue_ts": sst.cell_time(f_cell),
              "lead_min": ldct_point["lead_min"],
              "lat":      ldct_point["lat"],
              "lng":      ldct_point["lng"],

@@ -34,6 +34,7 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
             --tracks-file data/state/slm_tracks_state.json \
             --verify-file data/state/slm_verification.csv
 
+2026.nov  mlabru  [fix] t_ref da célula (média dos ts) e parent_id no JSON do frame
 2026.nov  mlabru  frame já aplicado ao estado (newest_ts) não é reaplicado
 2026.nov  mlabru  verificação das previsões (slm_verify, --verify-file)
 2026.nov  mlabru  clustering na janela fixa do CSV inteiro (não só nos eventos
@@ -264,7 +265,8 @@ def _build_cell(flst_cluster: list) -> sst.TCell:
                        flash_rate=trk.compute_flash_rate(flst_cluster, lf_duration_min),
                        density=trk.compute_density(flst_cluster, lt_centroid),
                        t_start=lf_start_ts,
-                       t_end=lf_end_ts)
+                       t_end=lf_end_ts,
+                       t_ref=sum(l_event.ts for l_event in flst_cluster) / len(flst_cluster))
 
     # [new] amplitude, polaridade e tipo por cluster
     compute_cell_stats(l_cell, flst_cluster)
@@ -337,6 +339,8 @@ def _cell_to_frame_dict(f_cell: sst.TCell) -> dict:
     """
     return {
         "id":             f_cell.id,
+        # [new] track de onde este se dividiu ("" = nenhum)
+        "parent_id":      f_cell.parent_id,
         "centroid":       f_cell.centroid,
         "size":           f_cell.size,
         "density":        f_cell.density,
@@ -347,6 +351,7 @@ def _cell_to_frame_dict(f_cell: sst.TCell) -> dict:
         "history":        f_cell.history,
         "t_start":        f_cell.t_start,
         "t_end":          f_cell.t_end,
+        "t_ref":          f_cell.t_ref,
         # [new] estatísticas de amplitude/polaridade/tipo
         "max_amp":        f_cell.max_amp,
         "mean_amp":       f_cell.mean_amp,

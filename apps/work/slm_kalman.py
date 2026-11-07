@@ -23,6 +23,8 @@ slm_tracks_state.json.  Os NOMES dos atributos de _TKalman1D (x, v, p_xx,
 p_xv, p_vv, q_pos, q_vel, r) são, portanto, o formato do arquivo: renomear um
 deles quebra a leitura de estados já gravados.
 
+2026.nov  mlabru  from_two_points (velocidade inicial pelo deslocamento dos dois
+                  primeiros frames) e spawn_at (track filho herda a velocidade)
 2026.nov  mlabru  ruído de processo proporcional a dt (era somado uma vez por
                   predict, fosse dt de 5 min ou de 2 h); velocity_deg_h
 2026.out  mlabru  refatoração para legibilidade: docstring do módulo (era cópia
@@ -160,6 +162,32 @@ class _TKalman1D:
         self.p_xx -= lf_gain_position * self.p_xx
 
     # ─────────────────────────────────────────────────────────────────────────────────
+    @classmethod
+    def from_two_points(cls, ff_x1: float, ff_x2: float, ff_dt_h: float) -> _TKalman1D:
+        """
+        filtro iniciado por duas posições medidas ff_dt_h horas uma da outra
+        (inicialização de dois pontos):
+
+            x = x2,  v = (x2 − x1) / dt
+            p_xx = r,  p_xv = r / dt,  p_vv = 2·r / dt²
+
+        a covariância é a que sai de duas medidas com ruído r cada: a
+        velocidade é tão incerta quanto o deslocamento medido permite.
+
+        :param ff_x1: posição anterior (graus)
+        :param ff_x2: posição atual (graus)
+        :param ff_dt_h: intervalo entre as duas, em horas (> 0)
+        :returns: novo filtro, com os ruídos padrão do módulo
+        """
+        l_filter = cls(ff_x2, (ff_x2 - ff_x1) / ff_dt_h)
+
+        l_filter.p_xx = l_filter.r
+        l_filter.p_xv = l_filter.r / ff_dt_h
+        l_filter.p_vv = 2.0 * l_filter.r / (ff_dt_h * ff_dt_h)
+
+        return l_filter
+
+    # ─────────────────────────────────────────────────────────────────────────────────
     @property
     def std(self) -> float:
         """
@@ -197,6 +225,46 @@ class TKalmanTracker:
         """
         self._lat = _TKalman1D(ff_lat0, ff_vlat)
         self._lng = _TKalman1D(ff_lng0, ff_vlng)
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    @classmethod
+    def from_two_points(cls, ft_pos1: tuple, ft_pos2: tuple, ff_dt_h: float) -> TKalmanTracker:
+        """
+        rastreador iniciado pelas duas primeiras posições de um track.
+
+        [fix] o filtro nascia com velocidade zero e P_vv pequeno (0.1): levava
+        6-7 frames (~30 min) para chegar à velocidade real, e a seta e o cone
+        ficavam parados nesse tempo.  Com dois pontos, a velocidade já é a do
+        deslocamento medido, e a incerteza dela é a que esse deslocamento
+        permite (ver _TKalman1D.from_two_points).
+
+        :param ft_pos1: (lat, lng) anterior
+        :param ft_pos2: (lat, lng) atual
+        :param ff_dt_h: intervalo entre as duas, em horas (> 0)
+        :returns: novo rastreador na posição atual
+        """
+        l_tracker = cls.__new__(cls)
+        l_tracker._lat = _TKalman1D.from_two_points(ft_pos1[0], ft_pos2[0], ff_dt_h)
+        l_tracker._lng = _TKalman1D.from_two_points(ft_pos1[1], ft_pos2[1], ff_dt_h)
+
+        return l_tracker
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    def spawn_at(self, ff_lat: float, ff_lng: float) -> TKalmanTracker:
+        """
+        cópia deste rastreador movida para outra posição: a velocidade e as
+        covariâncias são herdadas (track filho de uma divisão, que se move com
+        o pai).  Este rastreador não muda.
+
+        :param ff_lat: latitude do filho (graus)
+        :param ff_lng: longitude do filho (graus)
+        :returns: novo rastreador
+        """
+        l_child = copy.deepcopy(self)
+        l_child._lat.x = ff_lat
+        l_child._lng.x = ff_lng
+
+        return l_child
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def update(self, ff_lat: float, ff_lng: float) -> None:

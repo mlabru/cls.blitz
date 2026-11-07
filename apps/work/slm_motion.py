@@ -22,6 +22,8 @@ movimento das células: velocidade, direção e previsão de posição.
       posições previstas para +10/+20/+30 min (CT_FORECAST_LEADS_MIN), com a
       incerteza 1-sigma do filtro de Kalman (slm_kalman).
 
+2026.nov  mlabru  [fix] elapsed_hours pelo sst.cell_time (era t_start, parado
+                  nos primeiros 20 min de uma célula com a janela fixa)
 2026.nov  mlabru  kalman_velocity: uma só velocidade (a do Kalman) para a seta
                   e o cone; antes a seta usava a EMA dos centroides e podia
                   apontar para outro lado
@@ -64,13 +66,14 @@ CF_MINUTES_PER_HOUR = 60.0
 # ─────────────────────────────────────────────────────────────────────────────────────
 def elapsed_hours(f_previous_cell: sst.TCell, f_current_cell: sst.TCell) -> float:
     """
-    tempo entre os inícios de duas células, em horas.
+    tempo entre duas células, em horas, pelo relógio do tracking
+    (sst.cell_time: o instante médio dos raios de cada uma).
 
     :param f_previous_cell: célula anterior
     :param f_current_cell: célula atual
-    :returns: (t_start atual - t_start anterior) / 3600; pode ser zero ou negativo
+    :returns: (instante atual - instante anterior) / 3600; pode ser zero ou negativo
     """
-    return (f_current_cell.t_start - f_previous_cell.t_start) / CF_SECONDS_PER_HOUR
+    return (sst.cell_time(f_current_cell) - sst.cell_time(f_previous_cell)) / CF_SECONDS_PER_HOUR
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def bearing_deg(ff_lat1: float, ff_lng1: float, ff_lat2: float, ff_lng2: float) -> float:

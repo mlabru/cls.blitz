@@ -92,3 +92,49 @@ def test_velocity_deg_h():
     kt = klm.TKalmanTracker(0.0, 0.0, ff_vlat=0.5, ff_vlng=-1.0)
 
     assert kt.velocity_deg_h == (0.5, -1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# inicialização por dois pontos e filho de divisão (2026.nov)
+
+def test_kalman1d_from_two_points_state_and_covariance():
+    dt = 5.0 / 60.0
+    k = klm._TKalman1D.from_two_points(1.0, 1.1, dt)
+
+    assert k.x == 1.1
+    assert k.v == pytest.approx(0.1 / dt)
+    assert (k.p_xx, k.p_xv, k.p_vv) == pytest.approx((k.r, k.r / dt, 2.0 * k.r / dt ** 2))
+    assert (k.q_pos, k.q_vel) == (klm.CF_KALMAN_Q_POS, klm.CF_KALMAN_Q_VEL)
+
+
+def test_kalman_tracker_from_two_points_extrapolates_the_displacement():
+    kt = klm.TKalmanTracker.from_two_points((0.0, 0.0), (0.5, 1.0), 1.0)
+
+    lat, lng, _, _ = kt.predict_position(1.0)
+
+    assert kt.velocity_deg_h == pytest.approx((0.5, 1.0))
+    assert (lat, lng) == pytest.approx((1.0, 2.0))
+
+
+def test_kalman_tracker_from_two_points_round_trips():
+    kt = klm.TKalmanTracker.from_two_points((0.0, 0.0), (0.5, 1.0), 1.0)
+
+    restored = klm.TKalmanTracker.from_dict(kt.to_dict())
+
+    assert restored.to_dict() == kt.to_dict()
+
+
+def test_spawn_at_inherits_velocity_and_covariance_not_position():
+    parent = klm.TKalmanTracker(0.0, 0.0, ff_vlat=0.2, ff_vlng=-0.3)
+    parent.predict(0.1)
+    parent.update(0.02, -0.03)
+    before = parent.to_dict()
+
+    child = parent.spawn_at(5.0, 6.0)
+
+    assert child.velocity_deg_h == parent.velocity_deg_h
+    assert child.predict_position(0.0)[:2] == (5.0, 6.0)
+    assert child.predict_position(1.0)[2:] == parent.predict_position(1.0)[2:]
+    assert parent.to_dict() == before                     # o pai não muda
+    child.update(9.0, 9.0)
+    assert parent.to_dict() == before                     # e não compartilha estado

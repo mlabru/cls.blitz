@@ -289,3 +289,127 @@ def test_load_applied_ts_defaults_to_zero(tmp_path, content):
         path.write_text(content)
 
     assert trk.load_applied_ts(str(path)) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# velocidade inicial pelos dois primeiros frames (2026.nov)
+
+def _c(lat, lng, t, size=10):
+    return sst.TCell(centroid=(lat, lng), size=size, t_start=t, t_end=t, t_ref=float(t))
+
+
+def test_second_cell_initializes_kalman_velocity_from_displacement():
+    # [fix] antes o filtro nascia parado e levava ~6 frames para chegar à velocidade
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    cell1 = _c(0.0, 0.1, 300)                  # 0.1 grau em 5 min = 1.2 grau/h
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, [cell1], {0: 0})
+
+    assert kalman[cell1.id].velocity_deg_h == pytest.approx((0.0, 1.2))
+    assert cell1.speed_kmh == pytest.approx(1.2 * 111.0, rel=0.01)
+    assert cell1.direction_deg == pytest.approx(90.0, abs=1e-6)
+
+
+def test_short_interval_keeps_regular_kalman_cycle():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    first_filter = kalman[tracks[0].id]
+    min_s = trk.CF_MIN_TWO_POINT_DT_MIN * 60
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.1, min_s - 1)], {0: 0})
+
+    assert kalman[tracks[0].id] is first_filter          # predict/update, não reinício
+    assert kalman[tracks[0].id].velocity_deg_h[1] < 1.2
+
+
+def test_only_second_cell_reinitializes():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.1, 300)], {0: 0})
+    second_filter = kalman[tracks[0].id]
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.2, 600)], {0: 0})
+
+    assert kalman[tracks[0].id] is second_filter
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# divisão e fusão (2026.nov)
+
+def _two_frames_split(child_km):
+    # frame 1: uma célula; frame 2: ela continua e aparece outra a child_km dela
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.05, 300)], {0: 0})
+    parent = tracks[0]
+
+    fragment = _c(0.0, 0.10, 600)
+    child = _c(0.0, 0.10 + child_km / 111.19, 600)
+    tracks, kalman = trk.update_tracks(tracks, kalman, [fragment, child], {0: 0})
+
+    return tracks, kalman, parent, child
+
+
+def test_split_child_gets_parent_id_and_parent_velocity():
+    tracks, kalman, parent, child = _two_frames_split(25.0)
+
+    assert len(tracks) == 2
+    child_track = tracks[1]
+    assert child.id == child_track.id != parent.id
+    assert child.parent_id == child_track.parent_id == parent.id
+    assert kalman[child.id].velocity_deg_h == kalman[parent.id].velocity_deg_h
+    assert kalman[child.id].predict_position(0.0)[:2] == child.centroid
+    assert parent.parent_id == "" and parent.history[-1].parent_id == ""
+
+
+def test_far_unmatched_cell_is_an_independent_track():
+    tracks, kalman, parent, child = _two_frames_split(trk.CF_SPLIT_MERGE_DIST_KM + 5.0)
+
+    assert child.parent_id == tracks[1].parent_id == ""
+    assert kalman[child.id].velocity_deg_h == (0.0, 0.0)
+
+
+def test_split_child_is_not_reinitialized_by_two_points():
+    tracks, kalman, parent, child = _two_frames_split(25.0)
+    inherited = kalman[child.id]
+    child_track_index = 1
+
+    nxt = _c(0.0, child.centroid[1] + 0.05, 900)
+    tracks, kalman = trk.update_tracks(tracks, kalman, [nxt], {0: child_track_index})
+
+    assert kalman[child.id] is inherited
+    assert nxt.parent_id == parent.id                      # a linhagem segue nas células
+
+
+def _two_tracks(gap_km):
+    a = _c(0.0, 0.0, 0)
+    b = _c(0.0, gap_km / 111.19, 0)
+    return trk.update_tracks([], {}, [a, b], {})
+
+
+def test_merge_deactivates_absorbed_track_immediately():
+    tracks, kalman = _two_tracks(25.0)
+    merged = _c(0.0, 12.5 / 111.19, 300, size=20)          # no meio dos dois
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, [merged], {0: 0})
+
+    assert tracks[0].active and merged.id == tracks[0].id
+    assert not tracks[1].active
+    assert tracks[1].missed_frames == 0                   # não virou fantasma
+    assert len(tracks) == 2                               # e não abriu track novo
+
+
+def test_far_unmatched_track_counts_missed_frame():
+    tracks, kalman = _two_tracks(trk.CF_SPLIT_MERGE_DIST_KM + 20.0)
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, [_c(0.0, 0.0, 300)], {0: 0})
+
+    assert tracks[1].active
+    assert tracks[1].missed_frames == 1
+
+
+def test_parent_id_survives_save_and_load(tmp_path):
+    path = tmp_path / "tracks.json"
+    track = sst.TStormTrack(id="B", history=[_c(0.0, 0.0, 0)], parent_id="A")
+
+    trk.save_tracks(str(path), [track], {})
+    loaded, _ = trk.load_tracks(str(path))
+
+    assert loaded[0].parent_id == "A"
