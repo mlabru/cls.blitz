@@ -362,6 +362,52 @@ class TestMain:
 
 # < trava MET_ENV=test >───────────────────────────────────────────────────────────────
 
+class TestGenerateMap:
+    """
+    [fix] o CSV só é marcado como processado depois do mapa (ou de "sem raios", rc 3)
+    """
+
+    def _twice(self, fpth_tmp: pathlib.Path, fi_mapper_rc: int) -> tuple:
+        lpth_proj = _project(fpth_tmp, {"slmMapper": fi_mapper_rc})
+        lpth_csv = fpth_tmp / "raw.csv"
+        lpth_csv.write_text("timestamp,lat,lng\n")
+
+        lproc = _source(f'slm_enter_run_dir; generate_map "{lpth_csv}" t; generate_map "{lpth_csv}" t',
+                        lpth_proj)
+
+        lpth_state = lpth_proj / "data" / "state" / ".slm_last_processed"
+        ls_state = lpth_state.read_text().strip() if lpth_state.exists() else ""
+        ls_log = (lpth_proj / "logs" / "slm_app.log").read_text()
+
+        return lproc, lpth_proj, lpth_csv, ls_state, ls_log
+
+    def test_sucesso_marca_e_nao_repete(self, tmp_path):
+        lproc, lpth_proj, lpth_csv, ls_state, ls_log = self._twice(tmp_path, 0)
+
+        assert 0 == lproc.returncode, lproc.stderr
+        assert ["slmMapper"] == _names(lpth_proj)
+        assert str(int(lpth_csv.stat().st_mtime)) == ls_state
+        assert (lpth_proj / "data" / "output" / "slm_now.png").exists()
+
+    def test_falha_nao_marca_e_tenta_de_novo(self, tmp_path):
+        lproc, lpth_proj, _, ls_state, ls_log = self._twice(tmp_path, 1)
+
+        assert 0 == lproc.returncode, lproc.stderr
+        assert ["slmMapper", "slmMapper"] == _names(lpth_proj)
+        assert "" == ls_state
+        assert "nova tentativa na próxima rodada" in ls_log
+        assert not list((lpth_proj / "data" / "temp").glob("tmp.*.png"))
+
+    def test_sem_raios_marca_sem_erro(self, tmp_path):
+        lproc, lpth_proj, lpth_csv, ls_state, ls_log = self._twice(tmp_path, 3)
+
+        assert 0 == lproc.returncode, lproc.stderr
+        assert ["slmMapper"] == _names(lpth_proj)
+        assert str(int(lpth_csv.stat().st_mtime)) == ls_state
+        assert "sem raios na região" in ls_log
+        assert "[error]" not in ls_log
+        assert not (lpth_proj / "data" / "output" / "slm_now.png").exists()
+
 class TestTestEnvGuard:
 
     def test_recusa_slm_path_fora_da_raiz_de_teste(self, tmp_path):

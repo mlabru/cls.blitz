@@ -272,3 +272,44 @@ def test_process_without_verify_file_writes_nothing(tmp_path):
     _run(tmp_path, rows, since_ts=0)
 
     assert not list(tmp_path.glob("*.csv"))[1:]   # só o raw.csv
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# frame já aplicado não é reaplicado se o shell ficou para trás (2026.nov)
+
+def test_process_does_not_reapply_frame_when_shell_lags(tmp_path):
+    tracks_path = tmp_path / "tracks.json"
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+
+    newest, frame = _run(tmp_path, rows, since_ts=0)
+    state1 = tracks_path.read_text()
+
+    # o shell morreu antes de gravar .slm_last_ts: a rodada seguinte recebe since_ts antigo
+    newest2 = trkmod.process(str(tmp_path / "raw.csv"), str(tmp_path / "frame2.json"), 0.0,
+                             str(tracks_path))
+
+    assert newest2 == newest                       # o shell alcança o estado...
+    assert tracks_path.read_text() == state1       # ...sem reaplicar o frame
+    assert not (tmp_path / "frame2.json").exists()
+
+    # com raios novos, o frame seguinte entra uma vez só no histórico
+    rows += [(1300, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    _, frame3 = _run(tmp_path, rows, since_ts=0, name="frame3.json")
+
+    assert frame3[0]["id"] == frame[0]["id"]
+    assert len(frame3[0]["history"]) == 2
+
+
+def test_process_returns_none_when_shell_is_up_to_date(tmp_path):
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    newest, _ = _run(tmp_path, rows, since_ts=0)
+
+    assert _run(tmp_path, rows, since_ts=newest)[0] is None
+
+
+def test_process_state_ahead_but_no_cells_still_catches_up(tmp_path):
+    # mesmo sem células novas, o shell atrasado é avisado do frame já aplicado
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+    newest, _ = _run(tmp_path, rows, since_ts=0)
+
+    assert _run(tmp_path, [(900, 0.0, 0.0)], since_ts=500)[0] == newest

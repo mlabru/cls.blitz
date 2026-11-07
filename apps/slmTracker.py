@@ -34,6 +34,7 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
             --tracks-file data/state/slm_tracks_state.json \
             --verify-file data/state/slm_verification.csv
 
+2026.nov  mlabru  frame já aplicado ao estado (newest_ts) não é reaplicado
 2026.nov  mlabru  verificação das previsões (slm_verify, --verify-file)
 2026.nov  mlabru  clustering na janela fixa do CSV inteiro (não só nos eventos
                   novos): janela de tamanho constante e raios atrasados do
@@ -372,12 +373,18 @@ def process(fs_input_csv: str, fs_output_json: str,
     :param fs_tracks_file: arquivo de estado dos tracks entre execuções
     :param fs_verify_file: CSV de verificação das previsões; None = não grava
     :returns: ts do evento novo mais recente; None se não houve frame
-              (sem eventos, sem eventos novos ou sem células)
+              (sem eventos, sem eventos novos ou sem células); o ts do
+              último frame aplicado, se o shell estiver atrasado (_catch_up_ts)
     """
     llst_all_events = _load_events(fs_input_csv)
 
-    if not _has_new_events(llst_all_events, ff_since_ts):
-        return None
+    # [fix] o estado dos tracks sabe até onde já foi aplicado; se o shell
+    # ficou para trás (morreu antes de gravar .slm_last_ts), o corte é o do
+    # estado, e o frame já aplicado não é reaplicado
+    lf_applied_ts = trk.load_applied_ts(fs_tracks_file)
+
+    if not _has_new_events(llst_all_events, max(ff_since_ts, lf_applied_ts)):
+        return _catch_up_ts(ff_since_ts, lf_applied_ts)
 
     # [fix] o clustering usa a janela fixa dos últimos CI_WINDOW_MINUTES do CSV
     # INTEIRO, não só os eventos novos: (a) a janela tem sempre o mesmo
@@ -411,7 +418,7 @@ def process(fs_input_csv: str, fs_output_json: str,
     # estado dos tracks fica duplicado.
     export_frame(llst_cells, fs_output_json)
 
-    trk.save_tracks(fs_tracks_file, llst_tracks, ldct_kalman_states)
+    trk.save_tracks(fs_tracks_file, llst_tracks, ldct_kalman_states, lf_newest_ts)
 
     # [doc] depois do estado: se o processo morrer entre os dois, as linhas
     # se perdem (as previsões já saíram do estado), mas nunca se duplicam
@@ -421,6 +428,29 @@ def process(fs_input_csv: str, fs_output_json: str,
     M_LOG.info("frame exportado para %s (%d células).", fs_output_json, len(llst_cells))
 
     return lf_newest_ts
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _catch_up_ts(ff_since_ts: float, ff_applied_ts: float) -> float | None:
+    """
+    o que devolver quando não há evento novo depois do último frame aplicado.
+
+    se o estado está à frente do since_ts do shell, a rodada anterior gravou
+    o frame JSON e o estado mas morreu antes de o shell avançar
+    .slm_last_ts/.slm_frame_counter: devolver o ts aplicado faz o shell
+    publicar aquele frame (o JSON já existe) e alcançar o estado, sem
+    reaplicar nada.
+
+    :param ff_since_ts: since_ts recebido do shell
+    :param ff_applied_ts: ts do último frame aplicado ao estado (trk.load_applied_ts)
+    :returns: ff_applied_ts se o shell está atrasado; None (sem frame) caso contrário
+    """
+    if ff_applied_ts <= ff_since_ts:
+        return None
+
+    M_LOG.warning("frame de ts %s já aplicado ao estado (since_ts %s): só atualiza o shell.",
+                  ff_applied_ts, ff_since_ts)
+
+    return ff_applied_ts
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _load_events(fs_input_csv: str) -> list:

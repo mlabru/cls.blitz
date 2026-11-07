@@ -11,6 +11,8 @@
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
 #
+# 2026.nov  mlabru  [fix] generate_map só marca o CSV como processado depois
+#                   do mapa (ou de "sem raios", rc 3): falha é retentada
 # 2026.nov  mlabru  run_slm_tracker passa --verify-file (SLM_VERIFY_FILE)
 # 2026.out  mlabru  [fix] frames ordenados com sort -V (frame_10000 depois de
 #                   frame_9999); tracker recebe --tracks-file; get_state
@@ -249,9 +251,15 @@ run_slm_render()
 #
 # fluxo:
 #   1. sem CSV ou sem novidade: não faz nada (não é erro);
-#   2. grava o mtime do CSV como processado;
-#   3. gera o PNG num temporário e, se der certo, publica (NOW -> PRV, novo
-#      -> NOW) e grava a métrica last_update; se falhar, só loga.
+#   2. gera o PNG num temporário e, se der certo, publica (NOW -> PRV, novo
+#      -> NOW) e grava a métrica last_update;
+#   3. grava o mtime do CSV como processado -- só se deu certo ou se o
+#      mapper disse "sem raios na região" (rc 3, CI_RC_NO_LIGHTNING do
+#      slmMapper.py, logado como [info]).  Outra falha: loga [error] e a
+#      próxima rodada tenta de novo, mesmo sem o CSV mudar.
+#
+# [fix] o mtime era gravado ANTES de rodar o mapper: uma falha passageira
+# (cartopy, disco) deixava o mapa velho até o CSV mudar.
 #
 # uso: generate_map <csv> [prefixo-de-log]   (prefixo padrão: "mapper")
 #
@@ -260,6 +268,8 @@ generate_map()
     local ls_csv="$1"
     local ls_log_prefix="${2:-mapper}"
     local li_csv_mtime li_last_processed ls_temporary_png
+    local li_rc=0
+    local -r li_rc_no_lightning=3    # CI_RC_NO_LIGHTNING do slmMapper.py
 
     if [ ! -f "${ls_csv}" ]; then
         return 0
@@ -273,20 +283,29 @@ generate_map()
         return 0
     fi
 
-    safe_write "${SLM_LAST_PROC_FILE}" "${li_csv_mtime}"
-
     log "[info]: ${ls_log_prefix}: gerando mapa..."
 
     # sufixo $$ (PID) evita colisão com outro processo gerando ao mesmo tempo
     ls_temporary_png="${SLM_TEMP}/tmp.$$.png"
 
-    if ! run_slm_mapper "${ls_csv}" "${ls_temporary_png}"; then
-        log "[error]: ${ls_log_prefix}: mapper falhou na geração do mapa."
+    run_slm_mapper "${ls_csv}" "${ls_temporary_png}" || li_rc=$?
+
+    if (( li_rc == li_rc_no_lightning )); then
+        log "[info]: ${ls_log_prefix}: sem raios na região — mapa não gerado."
+        rm -f "${ls_temporary_png}"
+        safe_write "${SLM_LAST_PROC_FILE}" "${li_csv_mtime}"
+        return 0
+    fi
+
+    if (( 0 != li_rc )); then
+        log "[error]: ${ls_log_prefix}: mapper falhou na geração do mapa (rc ${li_rc}); nova tentativa na próxima rodada."
         rm -f "${ls_temporary_png}"
         return 0
     fi
 
     publish_map_png "${ls_temporary_png}"
+
+    safe_write "${SLM_LAST_PROC_FILE}" "${li_csv_mtime}"
 
     update_metrics "last_update" "$(date)"
 

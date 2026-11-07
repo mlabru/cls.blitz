@@ -29,6 +29,8 @@ códigos de retorno (contrato com o slm_run.sh, que só testa "deu zero?"):
 0 ok, 1 falha (sem API key, REDEMET indisponível/resposta inválida, erro de
 gravação).  Em falha o CSV anterior fica intacto.
 
+2026.nov  mlabru  [fix] deduplicação por contagem (multiconjunto): dois raios
+                  reais no mesmo minuto e ponto não viram um só
 2026.out  mlabru  [fix] resposta sem "anima"/"stsc" e posição sem "la"/"lo"
                   são logadas e tratadas, não mais KeyError não capturado
 2026.out  mlabru  refatoração para legibilidade: download_raios e
@@ -46,6 +48,7 @@ gravação).  Em falha o CSV anterior fica intacto.
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import datetime
 import json
@@ -414,13 +417,29 @@ def _drop_duplicates(flst_new_rows: list[dict], flst_kept_rows: list[dict]) -> l
     tira das linhas novas as que já estão no CSV (a API devolve a hora
     inteira a cada chamada, então chamadas seguidas se repetem).
 
+    [fix] a comparação é por CONTAGEM (multiconjunto), não por presença: a
+    chave é (minuto, lat, lng), e dois raios reais podem tê-la igual.  Se o
+    CSV tem a chave 1 vez e o snapshot 2 vezes (o segundo raio chegou
+    atrasado), entra 1; antes, os dois eram descartados por "já existir".
+
     :param flst_new_rows: linhas vindas da API
     :param flst_kept_rows: linhas já gravadas (dentro da janela)
-    :returns: linhas novas que não estavam no CSV, na ordem original
+    :returns: linhas novas que excedem a contagem já gravada, na ordem original
     """
-    lset_known_keys = {_row_key(ldct_row) for ldct_row in flst_kept_rows}
+    ldct_known_count = collections.Counter(_row_key(ldct_row) for ldct_row in flst_kept_rows)
 
-    return [ldct_row for ldct_row in flst_new_rows if _row_key(ldct_row) not in lset_known_keys]
+    llst_unique_rows = []
+
+    for ldct_row in flst_new_rows:
+        lt_key = _row_key(ldct_row)
+
+        if ldct_known_count[lt_key] > 0:
+            ldct_known_count[lt_key] -= 1
+            continue
+
+        llst_unique_rows.append(ldct_row)
+
+    return llst_unique_rows
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _row_key(fdct_row: dict) -> tuple:

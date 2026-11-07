@@ -20,6 +20,8 @@ acompanhamento (tracking) das células convectivas de um frame para o outro.
 fluxo de um frame (chamado por slmTracker.process):
   load_tracks -> expire_stale_tracks -> associate_cells -> update_tracks -> save_tracks
 
+2026.nov  mlabru  newest_ts no estado (load_applied_ts): frame não é reaplicado
+                  se o shell morrer antes de gravar .slm_last_ts
 2026.nov  mlabru  corte explícito de score (CF_MAX_MATCH_SCORE) na associação
 2026.nov  mlabru  forecasts do track persistidos (verificação, slm_verify)
 2026.nov  mlabru  expire_stale_tracks (tracks expiram por tempo, não só por
@@ -626,7 +628,8 @@ def _track_from_dict(fdct_track: dict) -> sst.TStormTrack:
                            forecasts=fdct_track.get("forecasts", []))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict) -> None:
+def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict,
+                ff_newest_ts: float = 0.0) -> None:
     """
     grava (atomicamente) os tracks ativos e seus estados de Kalman, para o
     próximo frame.
@@ -637,11 +640,14 @@ def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict) -> No
     :param fs_path: arquivo de estado (slm_tracks_state.json)
     :param flst_tracks: todos os tracks
     :param ldct_kalman_states: {id do track: TKalmanTracker}
+    :param ff_newest_ts: ts do raio mais recente do frame aplicado a este
+                         estado (ver load_applied_ts)
     """
     llst_active_tracks = [l_track for l_track in flst_tracks if l_track.active]
     lset_active_ids = {l_track.id for l_track in llst_active_tracks}
 
     ldct_state = {
+        "newest_ts": ff_newest_ts,
         "tracks": [_track_to_dict(l_track) for l_track in llst_active_tracks],
         "kalman": {ls_track_id: l_kalman.to_dict()
                    for ls_track_id, l_kalman in ldct_kalman_states.items()
@@ -651,6 +657,28 @@ def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict) -> No
     iou.atomic_write_json(fs_path, ldct_state)
 
     M_LOG.info("tracks persistidos em %s (%d ativos).", fs_path, _count_active(flst_tracks))
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def load_applied_ts(fs_path: str) -> float:
+    """
+    ts do raio mais recente do último frame já aplicado ao estado dos tracks.
+
+    [fix] o shell só grava .slm_last_ts DEPOIS que o tracker termina: se ele
+    morresse entre o save_tracks e o safe_write, a rodada seguinte recebia o
+    since_ts antigo e reaplicava o frame (histórico duplicado, Kalman
+    atualizado duas vezes com a mesma medida).  Com este valor no próprio
+    estado, o tracker sabe que o frame já foi aplicado (slmTracker.process).
+
+    :param fs_path: arquivo de estado (slm_tracks_state.json)
+    :returns: o ts gravado; 0.0 se o arquivo não existir, estiver corrompido
+              ou for de antes de 2026.nov (sem a chave)
+    """
+    try:
+        with open(fs_path) as l_file:
+            return float(json.load(l_file).get("newest_ts", 0.0))
+
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _track_to_dict(f_track: sst.TStormTrack) -> dict:

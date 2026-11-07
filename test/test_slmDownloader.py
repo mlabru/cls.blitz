@@ -152,3 +152,38 @@ def test_snapshot_to_rows_pula_posicao_sem_la_lo():
     rows = dl._snapshot_to_rows(["12:00"], [[{"la": -10.0, "lo": -50.0}, {"la": -11.0}]], cutoff)
 
     assert [(r["lat"], r["lng"]) for r in rows] == [(-10.0, -50.0)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# deduplicação por contagem (2026.nov)
+
+def _rows(*keys):
+    return [{"timestamp": t, "lat": la, "lng": lo} for t, la, lo in keys]
+
+
+def test_drop_duplicates_snapshot_repeating_csv_adds_nothing():
+    kept = _rows((60, "1.5", "2.5"), (60, "1.5", "2.5"), (120, "3.0", "4.0"))
+    new = _rows((60, 1.5, 2.5), (60, 1.5, 2.5), (120, 3.0, 4.0))
+
+    assert dl._drop_duplicates(new, kept) == []
+
+
+def test_drop_duplicates_keeps_late_strike_with_same_key():
+    # [fix] o 2º raio real no mesmo minuto e ponto chegou atrasado: antes era descartado
+    kept = _rows((60, "1.5", "2.5"))
+    new = _rows((60, 1.5, 2.5), (60, 1.5, 2.5))
+
+    assert dl._drop_duplicates(new, kept) == _rows((60, 1.5, 2.5))
+
+
+def test_drop_duplicates_first_download_keeps_all_repeats():
+    new = _rows((60, 1.5, 2.5), (60, 1.5, 2.5))
+
+    assert dl._drop_duplicates(new, []) == new
+
+
+def test_drop_duplicates_preserves_order_of_new_rows():
+    kept = _rows((60, "1.5", "2.5"))
+    new = _rows((120, 9.0, 9.0), (60, 1.5, 2.5), (180, 8.0, 8.0))
+
+    assert dl._drop_duplicates(new, kept) == _rows((120, 9.0, 9.0), (180, 8.0, 8.0))

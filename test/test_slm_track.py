@@ -268,3 +268,24 @@ def test_associate_cells_max_score_parameter():
     cell = _cell_at_km(80.0, 20)
 
     assert trk.associate_cells([_size_track(100)], [cell], ff_max_score=0.9) == {0: 0}
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# newest_ts no estado (2026.nov)
+
+def test_save_tracks_records_newest_ts(tmp_path):
+    path = tmp_path / "tracks.json"
+
+    trk.save_tracks(str(path), [], {}, 1234.0)
+
+    assert trk.load_applied_ts(str(path)) == 1234.0
+
+
+@pytest.mark.parametrize("content", [None, "", "{corrompido", "[]", '{"tracks": [], "kalman": {}}',
+                                     '{"newest_ts": "x"}'])
+def test_load_applied_ts_defaults_to_zero(tmp_path, content):
+    path = tmp_path / "tracks.json"
+    if content is not None:
+        path.write_text(content)
+
+    assert trk.load_applied_ts(str(path)) == 0.0
