@@ -123,3 +123,23 @@ def test_load_tracks_without_forecasts_key(tmp_path):
     loaded, _ = trk.load_tracks(str(path))
 
     assert loaded[0].forecasts == []
+
+
+def test_register_cells_uses_frame_issue_time():
+    track = sst.TStormTrack(id="A")
+    cell = sst.TCell(id="A", centroid=(0.0, 0.0), t_start=0, t_ref=500.0,
+                     forecast_path=[{"lead_min": 10, "lat": 0.0, "lng": 0.1}])
+
+    vrf.register_cells([cell], [track], 1100.0)
+
+    assert track.forecasts[0]["issue_ts"] == 1100.0
+
+
+def test_register_cells_without_issue_time_uses_cell_time():
+    track = sst.TStormTrack(id="A")
+    cell = sst.TCell(id="A", centroid=(0.0, 0.0), t_start=0, t_ref=500.0,
+                     forecast_path=[{"lead_min": 10, "lat": 0.0, "lng": 0.1}])
+
+    vrf.register_cells([cell], [track])
+
+    assert track.forecasts[0]["issue_ts"] == 500.0

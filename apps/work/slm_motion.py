@@ -22,6 +22,8 @@ movimento das células: velocidade, direção e previsão de posição.
       posições previstas para +10/+20/+30 min (CT_FORECAST_LEADS_MIN), com a
       incerteza 1-sigma do filtro de Kalman (slm_kalman).
 
+2026.nov  mlabru  [fix] extrapolate_path com ff_offset_h: horizontes contados do
+                  instante do frame, não do instante médio da célula
 2026.nov  mlabru  [fix] elapsed_hours pelo sst.cell_time (era t_start, parado
                   nos primeiros 20 min de uma célula com a janela fixa)
 2026.nov  mlabru  kalman_velocity: uma só velocidade (a do Kalman) para a seta
@@ -239,22 +241,31 @@ def kalman_velocity(f_tracker: klm.TKalmanTracker, ff_lat_deg: float) -> tuple:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def extrapolate_path(f_tracker: klm.TKalmanTracker,
-                     ft_leads_min: tuple = CT_FORECAST_LEADS_MIN) -> list:
+                     ft_leads_min: tuple = CT_FORECAST_LEADS_MIN,
+                     ff_offset_h: float = 0.0) -> list:
     """
     trajetória prevista de uma célula, pelo filtro de Kalman do seu track.
 
     [fix] os horizontes são a constante CT_FORECAST_LEADS_MIN.
     [new] cada ponto traz lat_std e lng_std: incerteza 1-sigma em GRAUS
           (o render converte para km eixo a eixo).
+    [fix] o estado do Kalman está no instante da célula (sst.cell_time, a
+          média dos raios da janela), até ~10 min antes do frame.  Sem
+          ff_offset_h, "+10 min" valia para 10 min depois desse instante,
+          não do frame -- o que quem lê o mapa entende.  O slmTracker passa
+          ff_offset_h = (instante do frame − instante da célula).
 
     :param f_tracker: filtro de Kalman do track (não é alterado)
-    :param ft_leads_min: horizontes, em minutos
+    :param ft_leads_min: horizontes, em minutos, contados do instante do frame
+    :param ff_offset_h: horas entre o estado do filtro e o instante do frame
+                        (negativo conta como 0)
     :returns: lista de dicts {lead_min, lat, lng, lat_std, lng_std}, um por horizonte
     """
     llst_forecast = []
+    lf_offset_h = max(ff_offset_h, 0.0)
 
     for li_lead_min in ft_leads_min:
-        lf_lead_hours = li_lead_min / CF_MINUTES_PER_HOUR
+        lf_lead_hours = li_lead_min / CF_MINUTES_PER_HOUR + lf_offset_h
 
         lf_lat, lf_lng, lf_lat_std, lf_lng_std = f_tracker.predict_position(lf_lead_hours)
 

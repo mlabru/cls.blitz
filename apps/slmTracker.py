@@ -34,6 +34,7 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
             --tracks-file data/state/slm_tracks_state.json \
             --verify-file data/state/slm_verification.csv
 
+2026.nov  mlabru  [fix] horizontes da previsão contados do instante do frame
 2026.nov  mlabru  [fix] t_ref da célula (média dos ts) e parent_id no JSON do frame
 2026.nov  mlabru  frame já aplicado ao estado (newest_ts) não é reaplicado
 2026.nov  mlabru  verificação das previsões (slm_verify, --verify-file)
@@ -412,9 +413,9 @@ def process(fs_input_csv: str, fs_output_json: str,
     # registra as novas (senão a previsão seria testada contra a própria célula)
     llst_verify_rows = vrf.verify_cells(llst_cells, llst_tracks)
 
-    _attach_forecast_and_history(llst_cells, llst_tracks, ldct_kalman_states)
+    _attach_forecast_and_history(llst_cells, llst_tracks, ldct_kalman_states, lf_newest_ts)
 
-    vrf.register_cells(llst_cells, llst_tracks)
+    vrf.register_cells(llst_cells, llst_tracks, lf_newest_ts)
 
     # [fix] o frame é gravado ANTES do estado dos tracks: export_frame() pode
     # ser repetido sem efeito colateral, save_tracks() não (repetir reaplica
@@ -522,22 +523,29 @@ def _track_cells(flst_cells: list, fs_tracks_file: str, ff_now_ts: float) -> tup
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _attach_forecast_and_history(flst_cells: list, flst_tracks: list,
-                                 fdct_kalman_states: dict) -> None:
+                                 fdct_kalman_states: dict, ff_frame_ts: float) -> None:
     """
     completa cada célula para o render: previsão pelo Kalman do track e a
     trilha (histórico do track como dicts serializáveis).
 
     cluster_window nunca preenche TCell.history: o histórico real vive no track.
 
+    [fix] os horizontes da previsão contam do instante do frame (o raio mais
+    recente), não do instante médio da célula: mtn.extrapolate_path recebe a
+    diferença entre os dois.
+
     :param flst_cells: células do frame atual, já com ID de track (ALTERADAS)
     :param flst_tracks: tracks atualizados
     :param fdct_kalman_states: {id do track: TKalmanTracker}
+    :param ff_frame_ts: instante do frame (ts do raio mais recente, epoch UTC)
     """
     ldct_tracks_by_id = {l_track.id: l_track for l_track in flst_tracks}
 
     for l_cell in flst_cells:
         if l_cell.id in fdct_kalman_states:
-            l_cell.forecast_path = mtn.extrapolate_path(fdct_kalman_states[l_cell.id])
+            lf_offset_h = (ff_frame_ts - sst.cell_time(l_cell)) / mtn.CF_SECONDS_PER_HOUR
+            l_cell.forecast_path = mtn.extrapolate_path(fdct_kalman_states[l_cell.id],
+                                                        ff_offset_h=lf_offset_h)
 
         l_track = ldct_tracks_by_id.get(l_cell.id)
 

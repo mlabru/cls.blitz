@@ -388,3 +388,47 @@ def test_process_merge_drops_absorbed_track(tmp_path):
     assert f1[0]["id"] in {c["id"] for c in f0}
     state = json.loads((tmp_path / "tracks.json").read_text())
     assert [t["id"] for t in state["tracks"]] == [f1[0]["id"]]   # o absorvido saiu na hora
+
+
+def test_process_forecast_leads_count_from_frame_time(tmp_path):
+    # [fix] a célula do 2º frame tem t_ref = 1150 e o frame é 1300: o "+10 min"
+    # vale para 1300 + 600, não para 1150 + 600
+    n = trkmod.CI_MIN_PTS
+    rows = [(1000, 0.0, 0.0)] * n
+    newest, _ = _run(tmp_path, rows, since_ts=0)
+    rows += [(1300, 0.0, 0.05)] * n
+    _, frame = _run(tmp_path, rows, since_ts=newest, name="frame2.json")
+
+    cell = frame[0]
+    v_lng_deg_h = 0.05 * 12                              # 0.05 grau em 5 min
+    offset_h = (1300 - cell["t_ref"]) / 3600.0
+    for point in cell["forecast_path"]:
+        expected = cell["centroid"][1] + v_lng_deg_h * (point["lead_min"] / 60.0 + offset_h)
+        assert point["lng"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_process_verification_issue_ts_is_frame_time(tmp_path):
+    n = trkmod.CI_MIN_PTS
+    verify_path = tmp_path / "verify.csv"
+    tracks_path = tmp_path / "tracks.json"
+    rows = []
+
+    # janela compartilhada: o t_ref fica atrás do frame
+    for i in range(10):
+        ts = 1000 + 300 * i
+        rows += [(ts, 0.0, 0.0)] * n
+        csv_path = tmp_path / "raw.csv"
+        _write_csv(csv_path, rows)
+        trkmod.process(str(csv_path), str(tmp_path / "f.json"), ts - 1,
+                       str(tracks_path), str(verify_path))
+
+    with open(verify_path, newline="") as fh:
+        data = list(csv.DictReader(fh))
+
+    frame_times = {1000 + 300 * i for i in range(10)}
+    assert data
+    assert all(float(r["issue_ts"]) in frame_times for r in data)
+    # conferida com a célula cujo instante (médio) cai em emissão + lead
+    tol = trkmod.vrf.CF_VERIFY_TOLERANCE_MIN * 60
+    assert all(abs(float(r["verify_ts"]) - float(r["issue_ts"]) - 60 * int(r["lead_min"])) <= tol
+               for r in data)

@@ -20,10 +20,12 @@ como funciona (chamado por slmTracker.process a cada frame):
      como pendentes no track (TStormTrack.forecasts, persistido com o estado);
   3) append_rows: as linhas vão para o CSV de verificação.
 
-o relógio é o mesmo de todo o tracking: sst.cell_time (o instante médio dos
-raios da célula; o dt do Kalman e de elapsed_hours), então a previsão
-emitida na célula de instante T com lead L vale para a célula de instante
-≈ T + L.
+a previsão é emitida no instante do FRAME (o raio mais recente) e vale para
+emissão + lead -- é assim que o slmTracker a calcula.  A célula observada é
+comparada pelo instante dela (sst.cell_time, a média dos raios: o instante a
+que o centroide corresponde), então a previsão emitida no frame T com lead
+L é conferida com a célula de instante ≈ T + L, que em geral aparece uns
+10 min depois, num frame posterior.
 
 cada linha traz também o erro da PERSISTÊNCIA (supor que a célula ficou
 parada na posição de emissão): a previsão só tem valor se errar menos que ela.
@@ -37,6 +39,7 @@ médio por lead, previsão x persistência), sem dependências:
              END {for (l in n) printf "%s min: %.1f km (persist. %.1f km, n=%d)\n",
                                       l, e[l]/n[l], p[l]/n[l], n[l]}' slm_verification.csv
 
+2026.nov  mlabru  [fix] previsão emitida no instante do frame (register_cells)
 2026.nov  mlabru  [fix] relógio pelo sst.cell_time (era t_start)
 2026.nov  mlabru  initial version
 """
@@ -175,13 +178,16 @@ def _verification_row(fs_track_id: str, fdct_forecast: dict, f_cell: sst.TCell) 
 # ═════════════════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def register_cells(flst_cells: list, flst_tracks: list) -> None:
+def register_cells(flst_cells: list, flst_tracks: list,
+                   ff_issue_ts: float | None = None) -> None:
     """
     guarda no track de cada célula as previsões que ela acabou de emitir.
     Chamar depois de preenchido o forecast_path (e depois de verify_cells).
 
     :param flst_cells: células do frame atual, com ID de track e forecast_path
     :param flst_tracks: tracks atualizados (os forecasts são ALTERADOS)
+    :param ff_issue_ts: instante a partir do qual os leads contam (o do frame);
+                        None = o instante de cada célula
     """
     ldct_tracks_by_id = {l_track.id: l_track for l_track in flst_tracks}
 
@@ -191,19 +197,21 @@ def register_cells(flst_cells: list, flst_tracks: list) -> None:
         if l_track is None:
             continue
 
-        l_track.forecasts.extend(_pending_forecasts(l_cell))
+        l_track.forecasts.extend(_pending_forecasts(l_cell, ff_issue_ts))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _pending_forecasts(f_cell: sst.TCell) -> list:
+def _pending_forecasts(f_cell: sst.TCell, ff_issue_ts: float | None = None) -> list:
     """
     as previsões de uma célula no formato pendente (o que verify_track lê).
 
     :param f_cell: célula com forecast_path (slm_motion.extrapolate_path)
+    :param ff_issue_ts: instante de emissão; None = o instante da célula
     :returns: lista de dicts issue_ts, lead_min, lat, lng, lat0, lng0
     """
     lf_lat0, lf_lng0 = f_cell.centroid
+    lf_issue_ts = sst.cell_time(f_cell) if ff_issue_ts is None else ff_issue_ts
 
-    return [{"issue_ts": sst.cell_time(f_cell),
+    return [{"issue_ts": lf_issue_ts,
              "lead_min": ldct_point["lead_min"],
              "lat":      ldct_point["lat"],
              "lng":      ldct_point["lng"],

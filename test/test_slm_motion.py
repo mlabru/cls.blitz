@@ -95,3 +95,31 @@ def test_elapsed_hours_uses_mean_time_not_first_strike():
     curr = sst.TCell(t_start=0, t_ref=60.0 + 1800.0)
 
     assert mtn.elapsed_hours(prev, curr) == pytest.approx(0.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# horizontes contados do instante do frame (2026.nov)
+
+def test_extrapolate_path_offset_shifts_every_lead():
+    kt = klm.TKalmanTracker(0.0, 0.0, ff_vlng=1.0)      # 1 grau/h para leste
+
+    path = mtn.extrapolate_path(kt, ff_offset_h=0.25)   # filtro 15 min atrás do frame
+
+    assert [p["lead_min"] for p in path] == list(mtn.CT_FORECAST_LEADS_MIN)
+    assert [p["lng"] for p in path] == pytest.approx([0.25 + l / 60.0
+                                                      for l in mtn.CT_FORECAST_LEADS_MIN])
+
+
+def test_extrapolate_path_offset_widens_uncertainty():
+    kt = klm.TKalmanTracker(0.0, 0.0)
+
+    plain = mtn.extrapolate_path(kt)
+    shifted = mtn.extrapolate_path(kt, ff_offset_h=0.25)
+
+    assert all(s["lng_std"] > p["lng_std"] for s, p in zip(shifted, plain))
+
+
+def test_extrapolate_path_negative_offset_counts_as_zero():
+    kt = klm.TKalmanTracker(0.0, 0.0, ff_vlng=1.0)
+
+    assert mtn.extrapolate_path(kt, ff_offset_h=-1.0) == mtn.extrapolate_path(kt)
