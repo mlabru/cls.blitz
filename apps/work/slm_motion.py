@@ -7,15 +7,24 @@ Simple Lightning Model
 slm_motion
 movimento das células: velocidade, direção e previsão de posição.
 
+  kalman_velocity
+      velocidade (km/h) e azimute estimados pelo filtro de Kalman do track:
+      é o movimento que vai para o JSON (seta do slmRender), o mesmo que
+      extrapolate_path usa no cone de previsão;
   compute_speed_kmh / compute_direction
       movimento instantâneo entre duas células consecutivas do mesmo track;
   compute_velocity_ema
       movimento suavizado sobre o histórico do track (média exponencial:
       o par mais recente pesa mais);
+  [doc] desde 2026.nov estas três não alimentam mais o pipeline (a velocidade
+  vem do Kalman); ficam como ferramenta de análise, cobertas pelos testes;
   extrapolate_path
       posições previstas para +10/+20/+30 min (CT_FORECAST_LEADS_MIN), com a
       incerteza 1-sigma do filtro de Kalman (slm_kalman).
 
+2026.nov  mlabru  kalman_velocity: uma só velocidade (a do Kalman) para a seta
+                  e o cone; antes a seta usava a EMA dos centroides e podia
+                  apontar para outro lado
 2026.out  mlabru  refatoração para legibilidade: elapsed_hours() reúne a conta
                   de horas entre células (estava em três lugares), passo
                   ponderado da EMA em função própria, logs de debug removidos;
@@ -34,6 +43,7 @@ from __future__ import annotations
 import math
 
 # locals
+import work.slm_geo as geo
 import work.slm_kalman as klm
 import work.slm_spatial as spc
 import work.slm_struct as sst
@@ -192,6 +202,37 @@ def _pair_speed_and_bearing(f_previous_cell: sst.TCell, f_current_cell: sst.TCel
                              f_current_cell.centroid[0], f_current_cell.centroid[1])
 
     return lf_distance_km / ff_hours, math.radians(lf_bearing)
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def kalman_velocity(f_tracker: klm.TKalmanTracker, ff_lat_deg: float) -> tuple:
+    """
+    velocidade e azimute do track segundo o filtro de Kalman.
+
+    [fix] antes a célula recebia a EMA das velocidades entre centroides
+    (compute_velocity_ema) e a previsão usava o Kalman: com o ruído típico
+    do centroide, a seta e o cone podiam apontar para lados diferentes.
+
+    as componentes em graus/hora viram km/h eixo a eixo (slm_geo): um grau
+    de longitude encolhe com a latitude.
+
+    :param f_tracker: filtro do track (já atualizado com a célula atual)
+    :param ff_lat_deg: latitude onde converter a longitude (a da célula)
+    :returns: (velocidade em km/h, azimute em graus: 0 = norte, 90 = leste);
+              (0.0, 0.0) se o filtro estiver parado
+    """
+    lf_v_lat, lf_v_lng = f_tracker.velocity_deg_h
+
+    lf_north_kmh = lf_v_lat * geo.CF_KM_PER_DEG_LAT
+    lf_east_kmh = lf_v_lng * geo.km_per_deg_lng(ff_lat_deg)
+
+    lf_speed_kmh = math.hypot(lf_north_kmh, lf_east_kmh)
+
+    if 0.0 == lf_speed_kmh:
+        return 0.0, 0.0
+
+    lf_direction_deg = math.degrees(math.atan2(lf_east_kmh, lf_north_kmh)) % 360.0
+
+    return lf_speed_kmh, lf_direction_deg
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def extrapolate_path(f_tracker: klm.TKalmanTracker,

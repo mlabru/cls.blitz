@@ -14,6 +14,7 @@ estruturas de dados do modelo:
 atenção: este módulo é importado como "sst" em todo o projeto, nunca como
 "str" -- um bug antigo sombreava o builtin str.
 
+2026.nov  mlabru  TStormTrack.forecasts (previsões pendentes de verificação)
 2026.out  mlabru  refatoração para legibilidade: comentários por campo,
                   docstrings completas, ruído de "# ok" removido; campos nunca
                   preenchidos removidos (TCell: severe, growing, dissipating,
@@ -149,6 +150,9 @@ class TStormTrack:
     missed_frames: int = 0
     # False quando o track passou de CI_MAX_MISSED frames perdidos
     active: bool = True
+    # [new] previsões emitidas e ainda não verificadas (slm_verify): dicts com
+    # issue_ts, lead_min, lat, lng e a posição de emissão lat0, lng0
+    forecasts: list = dataclasses.field(default_factory=list)
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @property

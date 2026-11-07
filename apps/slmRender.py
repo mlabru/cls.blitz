@@ -26,6 +26,8 @@ atenção: a ORDEM em que os elementos são desenhados importa para o resultado
 (com zorders iguais, quem é desenhado depois fica por cima).  Ao reorganizar,
 compare os PNGs antes/depois pixel a pixel.
 
+2026.nov  mlabru  seta só a partir de CF_MIN_ARROW_SPEED_KMH (a velocidade
+                  agora vem do Kalman e quase nunca é exatamente 0)
 2026.out  mlabru  refatoração para legibilidade: render dividido em
                   _load_cells, _draw_cell (e um passo por elemento), _draw_hud,
                   _draw_legend; classes de severidade numa tabela única
@@ -112,6 +114,9 @@ CF_MIN_ELLIPSE_RADIUS_DEG = 0.05
 CF_CG_DOMINANT_RATIO = 0.5
 # o anel é 15% maior que a elipse da célula
 CF_CG_RING_SCALE = 1.15
+
+# abaixo desta velocidade (km/h) a célula não ganha seta de movimento
+CF_MIN_ARROW_SPEED_KMH = 5.0
 
 # largura do cone sem incerteza do Kalman: 25% do comprimento da trajetória
 CF_CONE_FALLBACK_WIDTH_FRACTION = 0.25
@@ -392,7 +397,9 @@ def _draw_motion_arrow(f_axes: Axes, f_projection: ccrs.Projection, fdct_cell: d
     :param f_projection: projeção dos dados
     :param fdct_cell: célula do JSON
     """
-    lb_is_moving = fdct_cell.get("speed_kmh", 0.0) > 0.0
+    # [fix] a velocidade vem do Kalman (slm_motion.kalman_velocity), quase
+    # nunca exatamente 0: abaixo do limiar a célula conta como parada
+    lb_is_moving = fdct_cell.get("speed_kmh", 0.0) >= CF_MIN_ARROW_SPEED_KMH
 
     if not lb_is_moving:
         return

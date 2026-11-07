@@ -13,6 +13,7 @@
 # sempre "source"ado, nunca executado -- não define "set -e": herda as
 # opções de shell de quem importa.
 #
+# 2026.nov  mlabru  SLM_VERIFY_FILE (CSV de verificação, passado ao tracker)
 # 2026.out  mlabru  SLM_TRACKS_STATE_FILE explícito (passado ao tracker)
 # 2026.out  mlabru  - só cron: saem a FIFO tracker -> renderer, o sentinela
 #                     de shutdown, o lock do daemon, o lock do processor e
@@ -74,6 +75,11 @@ SLM_LAST_TS_FILE="${SLM_STATE}/.slm_last_ts"
 # ./data/state/slm_tracks_state.json -- o mesmo arquivo, mas só porque o
 # slm_run.sh faz cd para SLM_PATH.  Apagar este arquivo zera os IDs de track
 SLM_TRACKS_STATE_FILE="${SLM_STATE}/slm_tracks_state.json"
+
+# verificação das previsões (slmTracker.py --verify-file): uma linha por
+# previsão conferida contra a célula observada; cresce por append e é
+# rotacionado pelo check_log_size do slm_run.sh (GI_LOG_MAX_SIZE)
+SLM_VERIFY_FILE="${SLM_STATE}/slm_verification.csv"
 
 # métricas (chave=valor) e o lock que serializa a escrita delas
 SLM_METRICS="${SLM_STATE}/.slm_metrics.txt"

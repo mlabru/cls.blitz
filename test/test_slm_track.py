@@ -3,6 +3,7 @@ import math
 import pytest
 
 import work.slm_kalman as klm
+import work.slm_motion as mtn
 import work.slm_struct as sst
 import work.slm_track as trk
 
@@ -91,7 +92,10 @@ def test_update_tracks_associates_and_updates_motion():
 
     assert len(tracks[0].history) == 2
     assert cell1.id == tracks[0].id
-    assert cell1.speed_kmh == pytest.approx(111.19, rel=1e-3)
+    # velocidade da célula = a do Kalman (a mesma do cone de previsão), não a EMA
+    assert (cell1.speed_kmh, cell1.direction_deg) == mtn.kalman_velocity(kalman[cell1.id], 0.0)
+    assert cell1.speed_kmh > 0.0
+    assert cell1.direction_deg == pytest.approx(90.0, abs=1e-6)
     assert tracks[0].missed_frames == 0
 
 
@@ -221,3 +225,46 @@ def test_associate_cells_track_without_kalman_falls_back_to_last_position():
     cell = sst.TCell(centroid=(0.0, 0.01), size=10, t_start=3600, t_end=3600)
 
     assert trk.associate_cells([track], [cell], fdct_kalman_states={}) == {0: 0}
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# corte explícito de score (2026.nov)
+
+def _size_track(size):
+    return sst.TStormTrack(id="A", history=[sst.TCell(id="A", centroid=(0.0, 0.0), size=size)])
+
+
+def _cell_at_km(km_east, size):
+    return sst.TCell(centroid=(0.0, km_east / 111.19), size=size)
+
+
+def test_associate_cells_rejects_far_pair_with_size_mismatch():
+    # 80 km e tamanho 1:5 -> score 0.48 + 0.32 = 0.80 > CF_MAX_MATCH_SCORE (antes: aceito)
+    cell = _cell_at_km(80.0, 20)
+
+    assert trk.match_score(_size_track(100).last_cell, cell) == pytest.approx(0.8, abs=0.01)
+    assert trk.associate_cells([_size_track(100)], [cell]) == {}
+
+
+def test_associate_cells_accepts_far_pair_of_same_size():
+    assert trk.associate_cells([_size_track(100)], [_cell_at_km(80.0, 100)]) == {0: 0}
+
+
+def test_associate_cells_size_alone_never_rejects():
+    # no mesmo lugar, mesmo 1:10 (célula crescendo/dissipando) continua o track
+    assert trk.associate_cells([_size_track(100)], [_cell_at_km(0.0, 10)]) == {0: 0}
+
+
+@pytest.mark.parametrize("ratio,limit_km", [(1.0, 100.0), (0.5, 66.7), (0.25, 50.0), (0.1, 40.0)])
+def test_max_match_score_limits_documented_in_constant(ratio, limit_km):
+    size = int(100 * ratio)
+
+    assert trk.associate_cells([_size_track(100)], [_cell_at_km(limit_km - 1.0, size)]) == {0: 0}
+    assert trk.associate_cells([_size_track(100)], [_cell_at_km(limit_km + 1.0, size)]) == {}
+
+
+
+def test_associate_cells_max_score_parameter():
+    cell = _cell_at_km(80.0, 20)
+
+    assert trk.associate_cells([_size_track(100)], [cell], ff_max_score=0.9) == {0: 0}

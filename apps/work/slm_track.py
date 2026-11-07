@@ -20,6 +20,8 @@ acompanhamento (tracking) das células convectivas de um frame para o outro.
 fluxo de um frame (chamado por slmTracker.process):
   load_tracks -> expire_stale_tracks -> associate_cells -> update_tracks -> save_tracks
 
+2026.nov  mlabru  corte explícito de score (CF_MAX_MATCH_SCORE) na associação
+2026.nov  mlabru  forecasts do track persistidos (verificação, slm_verify)
 2026.nov  mlabru  expire_stale_tracks (tracks expiram por tempo, não só por
                   frames perdidos); associate_cells mede a distância até a
                   posição prevista pelo Kalman no instante da célula
@@ -80,6 +82,17 @@ CF_W_SIZE = 0.4   # penalidade de diferença de tamanho
 
 # custo "sem associação" na matriz do algoritmo húngaro (o máximo do match_score)
 CF_NO_MATCH_COST = 1.0
+
+# maior match_score aceito numa associação.  [fix] sem este corte, qualquer
+# par a menos de CF_MAX_DIST_KM tinha score < 1 e era aceito, e o tamanho
+# nunca decidia nada.  Com 0.6, exemplos (distância até a posição prevista):
+#   mesmo tamanho         -> aceito até ~100 km
+#   tamanho 1:2 (r = 0.5) -> aceito até ~67 km
+#   tamanho 1:4 (r = 0.25)-> aceito até ~50 km
+#   tamanho 1:10 (r = 0.1)-> aceito até ~40 km
+# no mesmo lugar, nenhuma diferença de tamanho sozinha recusa o par (células
+# crescem e dissipam rápido).  Ajuste com o slm_verification.csv
+CF_MAX_MATCH_SCORE = 0.6
 
 # raio mínimo (km) no cálculo de densidade, para não dividir por zero
 CF_MIN_DENSITY_RADIUS_KM = 1.0
@@ -213,15 +226,19 @@ def _size_ratio(fi_size_a: int, fi_size_b: int) -> float:
 # ─────────────────────────────────────────────────────────────────────────────────────
 def associate_cells(flst_tracks: list, flst_cells_curr: list,
                     ff_max_dist_km: float = CF_MAX_DIST_KM,
-                    fdct_kalman_states: dict | None = None) -> dict:
+                    fdct_kalman_states: dict | None = None,
+                    ff_max_score: float = CF_MAX_MATCH_SCORE) -> dict:
     """
     decide qual célula do frame atual continua qual track.
 
     monta uma matriz de custo (linha = track ativo, coluna = célula atual,
     valor = match_score) e usa o algoritmo húngaro
     (scipy.optimize.linear_sum_assignment), que acha a combinação de menor
-    custo TOTAL -- não o melhor par de cada track isolado.  Pares com custo
-    máximo (célula além de max_dist_km) são descartados.
+    custo TOTAL -- não o melhor par de cada track isolado.  Pares além de
+    max_dist_km ou com score acima de ff_max_score ficam com o custo de "sem
+    associação" ANTES do húngaro (assim ele não gasta um track num par que
+    seria recusado, em vez de escolher uma alternativa válida) e são
+    descartados depois.
 
     [fix] o guloso (vizinho mais próximo) foi trocado pelo húngaro: assim um
           track não "rouba" a célula mais próxima de outro.
@@ -235,6 +252,7 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
     :param ff_max_dist_km: distância máxima para associar
     :param fdct_kalman_states: {id do track: TKalmanTracker}; None (ou track
                                sem filtro) = usa a última posição observada
+    :param ff_max_score: maior match_score aceito
     :returns: dict {índice da célula atual: índice do track em flst_tracks},
               só com as associações aceitas
     """
@@ -247,7 +265,7 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
         return {}
 
     lnp_cost = _build_cost_matrix(llst_active_tracks, flst_cells_curr, ff_max_dist_km,
-                                  fdct_kalman_states or {})
+                                  fdct_kalman_states or {}, ff_max_score)
 
     llst_rows, llst_columns = opt.linear_sum_assignment(lnp_cost)
 
@@ -255,16 +273,18 @@ def associate_cells(flst_tracks: list, flst_cells_curr: list,
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
-                       ff_max_dist_km: float, fdct_kalman_states: dict) -> np.ndarray:
+                       ff_max_dist_km: float, fdct_kalman_states: dict,
+                       ff_max_score: float = CF_MAX_MATCH_SCORE) -> np.ndarray:
     """
     matriz de custo tracks x células para o algoritmo húngaro.
-    começa toda em CF_NO_MATCH_COST; só os pares a até ff_max_dist_km recebem
-    o match_score.
+    começa toda em CF_NO_MATCH_COST; só os pares a até ff_max_dist_km e com
+    match_score <= ff_max_score recebem o score.
 
     :param flst_active_tracks: lista de (índice original, TStormTrack) ativos
     :param flst_cells_curr: células do frame atual
     :param ff_max_dist_km: distância máxima para associar
     :param fdct_kalman_states: {id do track: TKalmanTracker} (pode ser vazio)
+    :param ff_max_score: maior match_score aceito
     :returns: array (n_tracks, n_células) de custos em [0, 1]
     """
     lnp_cost = np.full((len(flst_active_tracks), len(flst_cells_curr)),
@@ -283,8 +303,13 @@ def _build_cost_matrix(flst_active_tracks: list, flst_cells_curr: list,
             if lf_distance_km > ff_max_dist_km:
                 continue
 
-            lnp_cost[li_row, li_column] = match_score(l_last_cell, l_cell, ff_max_dist_km,
-                                                      ff_dist_km=lf_distance_km)
+            lf_score = match_score(l_last_cell, l_cell, ff_max_dist_km,
+                                   ff_dist_km=lf_distance_km)
+
+            if lf_score > ff_max_score:
+                continue
+
+            lnp_cost[li_row, li_column] = lf_score
 
     return lnp_cost
 
@@ -404,12 +429,12 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     acrescenta ao track a célula que o continua.
 
     passo a passo:
-      1. movimento instantâneo (velocidade/direção) em relação à última célula;
-      2. a célula recebe o ID do track e entra no histórico (limitado a
+      1. a célula recebe o ID do track e entra no histórico (limitado a
          CI_MAX_HISTORY);
-      3. com 2+ células, o movimento é trocado pelo suavizado (EMA);
-      4. idade do track cresce e o contador de frames perdidos zera;
-      5. Kalman: predict até o instante da célula, depois update com o centroide.
+      2. idade do track cresce e o contador de frames perdidos zera;
+      3. Kalman: predict até o instante da célula, depois update com o centroide;
+      4. velocidade/direção da célula = as do Kalman (mtn.kalman_velocity), a
+         mesma estimativa que o cone de previsão usa.
 
     :param f_track: track que continua
     :param f_cell: célula do frame atual associada a ele
@@ -418,17 +443,12 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     """
     l_previous_cell = f_track.last_cell
 
-    f_cell.speed_kmh = mtn.compute_speed_kmh(l_previous_cell, f_cell)
-    f_cell.direction_deg = mtn.compute_direction(l_previous_cell, f_cell)
     f_cell.id = f_track.id
 
     f_track.history.append(f_cell)
 
     if len(f_track.history) > CI_MAX_HISTORY:
         f_track.history = f_track.history[-CI_MAX_HISTORY:]
-
-    if len(f_track.history) >= 2:
-        f_cell.speed_kmh, f_cell.direction_deg = mtn.compute_velocity_ema(f_track.history)
 
     # nunca negativo: a janela deslizante pode reordenar clusters
     lf_elapsed_hours = max(mtn.elapsed_hours(l_previous_cell, f_cell), 0.0)
@@ -440,6 +460,10 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     l_kalman = fdct_kalman_states[f_cell.id]
     l_kalman.predict(lf_elapsed_hours)
     l_kalman.update(f_cell.centroid[0], f_cell.centroid[1])
+
+    # [fix] uma só velocidade: antes era a EMA dos centroides (seta) contra o
+    # Kalman (cone), que podiam divergir
+    f_cell.speed_kmh, f_cell.direction_deg = mtn.kalman_velocity(l_kalman, f_cell.centroid[0])
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _start_new_track(f_cell: sst.TCell, flst_tracks: list, fdct_kalman_states: dict) -> None:
@@ -587,7 +611,8 @@ def _track_from_dict(fdct_track: dict) -> sst.TStormTrack:
     """
     reconstrói um track do dict gravado por _track_to_dict.
 
-    :param fdct_track: dict com id, age_minutes, missed_frames, active e history
+    :param fdct_track: dict com id, age_minutes, missed_frames, active, history
+                       e (opcional) forecasts
     :returns: novo TStormTrack
     :raises KeyError: se faltar alguma chave
     """
@@ -596,7 +621,9 @@ def _track_from_dict(fdct_track: dict) -> sst.TStormTrack:
                            missed_frames=fdct_track["missed_frames"],
                            active=fdct_track["active"],
                            history=[sst.cell_from_dict(ldct_cell)
-                                    for ldct_cell in fdct_track["history"]])
+                                    for ldct_cell in fdct_track["history"]],
+                           # [fix] estado gravado antes de 2026.nov não tem a chave
+                           forecasts=fdct_track.get("forecasts", []))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict) -> None:
@@ -631,7 +658,7 @@ def _track_to_dict(f_track: sst.TStormTrack) -> dict:
     converte um track num dict serializável em JSON.
 
     :param f_track: track a converter
-    :returns: dict com id, age_minutes, missed_frames, active e history
+    :returns: dict com id, age_minutes, missed_frames, active, history e forecasts
     """
     return {
         "id":            f_track.id,
@@ -639,6 +666,7 @@ def _track_to_dict(f_track: sst.TStormTrack) -> dict:
         "missed_frames": f_track.missed_frames,
         "active":        f_track.active,
         "history":       [sst.cell_to_dict(l_cell) for l_cell in f_track.history],
+        "forecasts":     f_track.forecasts,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────────────

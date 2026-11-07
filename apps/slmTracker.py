@@ -22,15 +22,19 @@ fluxo (process):
   2) agrupa em células (cluster_window: janela + DBSCAN + estatísticas);
   3) tracking (slm_track: load_tracks, expire_stale_tracks, associate_cells,
      update_tracks);
-  4) previsão e trilha de cada célula (_attach_forecast_and_history);
-  5) grava o JSON do frame e depois o estado dos tracks.
+  4) verificação das previsões anteriores (slm_verify.verify_cells);
+  5) previsão e trilha de cada célula (_attach_forecast_and_history) e registro
+     das previsões novas para verificação futura (slm_verify.register_cells);
+  6) grava o JSON do frame, o estado dos tracks e as linhas de verificação.
 
 contrato com o shell (slm_common.sh): se houve frame novo, imprime no stdout
 uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
 
     python3 apps/slmTracker.py raw.csv frame.json --since-ts 1787010000 \
-            --tracks-file data/state/slm_tracks_state.json
+            --tracks-file data/state/slm_tracks_state.json \
+            --verify-file data/state/slm_verification.csv
 
+2026.nov  mlabru  verificação das previsões (slm_verify, --verify-file)
 2026.nov  mlabru  clustering na janela fixa do CSV inteiro (não só nos eventos
                   novos): janela de tamanho constante e raios atrasados do
                   último minuto não se perdem; tracks expiram por tempo antes
@@ -61,6 +65,7 @@ import work.slm_motion as mtn
 import work.slm_spatial as spc
 import work.slm_struct as sst      # [fix] era 'str', sobrescrevia o builtin str()
 import work.slm_track as trk
+import work.slm_verify as vrf
 
 # < constants >────────────────────────────────────────────────────────────────────────
 
@@ -78,6 +83,9 @@ CF_MIN_CELL_DURATION_MIN = 1.0
 
 # arquivo de estado padrão (o slm_common.sh pode informar outro)
 CS_DEFAULT_TRACKS_FILE = "./data/state/slm_tracks_state.json"
+
+# CSV de verificação padrão (o slm_common.sh pode informar outro)
+CS_DEFAULT_VERIFY_FILE = "./data/state/slm_verification.csv"
 
 # códigos de retorno
 CI_RC_OK = 0
@@ -353,7 +361,8 @@ def _cell_to_frame_dict(f_cell: sst.TCell) -> dict:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def process(fs_input_csv: str, fs_output_json: str,
-            ff_since_ts: float, fs_tracks_file: str) -> float | None:
+            ff_since_ts: float, fs_tracks_file: str,
+            fs_verify_file: str | None = None) -> float | None:
     """
     gera um frame completo (ver o fluxo no cabeçalho do módulo).
 
@@ -361,6 +370,7 @@ def process(fs_input_csv: str, fs_output_json: str,
     :param fs_output_json: JSON do frame a gravar
     :param ff_since_ts: só eventos com ts maior que este entram (epoch UTC)
     :param fs_tracks_file: arquivo de estado dos tracks entre execuções
+    :param fs_verify_file: CSV de verificação das previsões; None = não grava
     :returns: ts do evento novo mais recente; None se não houve frame
               (sem eventos, sem eventos novos ou sem células)
     """
@@ -386,7 +396,13 @@ def process(fs_input_csv: str, fs_output_json: str,
 
     llst_tracks, ldct_kalman_states = _track_cells(llst_cells, fs_tracks_file, lf_newest_ts)
 
+    # verifica as previsões antigas contra as células de agora e só DEPOIS
+    # registra as novas (senão a previsão seria testada contra a própria célula)
+    llst_verify_rows = vrf.verify_cells(llst_cells, llst_tracks)
+
     _attach_forecast_and_history(llst_cells, llst_tracks, ldct_kalman_states)
+
+    vrf.register_cells(llst_cells, llst_tracks)
 
     # [fix] o frame é gravado ANTES do estado dos tracks: export_frame() pode
     # ser repetido sem efeito colateral, save_tracks() não (repetir reaplica
@@ -396,6 +412,11 @@ def process(fs_input_csv: str, fs_output_json: str,
     export_frame(llst_cells, fs_output_json)
 
     trk.save_tracks(fs_tracks_file, llst_tracks, ldct_kalman_states)
+
+    # [doc] depois do estado: se o processo morrer entre os dois, as linhas
+    # se perdem (as previsões já saíram do estado), mas nunca se duplicam
+    if fs_verify_file:
+        vrf.append_rows(fs_verify_file, llst_verify_rows)
 
     M_LOG.info("frame exportado para %s (%d células).", fs_output_json, len(llst_cells))
 
@@ -499,7 +520,8 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
     lê a linha de comando.
 
     :param flst_argv: argumentos (None = sys.argv[1:])
-    :returns: namespace com input_csv, output_json, since_ts (float >= 0) e tracks_file
+    :returns: namespace com input_csv, output_json, since_ts (float >= 0),
+              tracks_file e verify_file
     """
     l_parser = argparse.ArgumentParser(
                    description="Simple Lightning Model — nowcasting incremental")
@@ -513,6 +535,9 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
     l_parser.add_argument("--tracks-file",
                           help="arquivo de estado persistente de tracks entre frames",
                           default=CS_DEFAULT_TRACKS_FILE)
+    l_parser.add_argument("--verify-file",
+                          help="CSV de verificação das previsões (acrescentado a cada frame)",
+                          default=CS_DEFAULT_VERIFY_FILE)
 
     l_args = l_parser.parse_args(flst_argv)
 
@@ -535,7 +560,7 @@ def main(flst_argv: list | None = None) -> int:
     l_args = _parse_args(flst_argv)
 
     lf_newest_ts = process(l_args.input_csv, l_args.output_json,
-                           l_args.since_ts, l_args.tracks_file)
+                           l_args.since_ts, l_args.tracks_file, l_args.verify_file)
 
     if lf_newest_ts is not None:
         # [doc] "NEWEST_TS=<ts>" é um contrato entre processos, não só uma

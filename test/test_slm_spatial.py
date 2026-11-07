@@ -47,3 +47,49 @@ def test_region_query_within_radius():
     neighbors = spc.region_query(grid, _pt(0.0, 0.0), 5.0)
 
     assert len(neighbors) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# raio de borda em um cluster só (2026.nov)
+
+def _two_clusters_sharing_a_border_point():
+    # eps = 5 km, min_pts = 5.  a0 e b0 são centrais (5 vizinhos cada + o ponto P),
+    # a 8.9 km um do outro (clusters separados).  P fica a 4.45 km dos dois, mas
+    # só tem 3 vizinhos (P, a0, b0): é borda dos DOIS clusters.
+    a_core = [_pt(0.0, -0.02) for _ in range(5)] + [_pt(0.0, 0.0)]
+    b_core = [_pt(0.0, 0.10) for _ in range(5)] + [_pt(0.0, 0.08)]
+    border = _pt(0.0, 0.04)
+    return a_core, b_core, border
+
+
+def test_dbscan_border_point_goes_to_one_cluster_only():
+    a_core, b_core, border = _two_clusters_sharing_a_border_point()
+
+    clusters = spc.dbscan_spatial(a_core + b_core + [border], ff_eps_km=5.0, fi_min_pts=5)
+
+    assert len(clusters) == 2
+    all_ids = [id(p) for c in clusters for p in c]
+    assert len(all_ids) == len(set(all_ids)) == 13
+    # fica com o primeiro cluster que o alcança
+    assert border in clusters[0] and border not in clusters[1]
+
+
+def test_dbscan_border_point_order_decides_cluster():
+    a_core, b_core, border = _two_clusters_sharing_a_border_point()
+
+    clusters = spc.dbscan_spatial(b_core + a_core + [border], ff_eps_km=5.0, fi_min_pts=5)
+
+    assert border in clusters[0] and border not in clusters[1]
+    assert sorted(len(c) for c in clusters) == [6, 7]
+
+
+def test_expand_cluster_without_global_set_still_works():
+    pts = [_pt(0.0, 0.0) for _ in range(6)]
+    grid = sgr.TSpatialGrid(5.0)
+    for p in pts:
+        grid.insert(p)
+
+    cluster = spc.expand_cluster(grid, pts[0], spc.region_query(grid, pts[0], 5.0),
+                                 {id(pts[0])}, 5.0, 5)
+
+    assert len(cluster) == 6

@@ -56,3 +56,33 @@ def test_extrapolate_path_length_and_lead_times():
 
     assert [p["lead_min"] for p in path] == list(mtn.CT_FORECAST_LEADS_MIN)
     assert all(p["lat_std"] >= 0.0 and p["lng_std"] >= 0.0 for p in path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# kalman_velocity (2026.nov)
+
+@pytest.mark.parametrize("vlat,vlng,expected_dir", [
+    (1.0, 0.0, 0.0),      # norte
+    (0.0, 1.0, 90.0),     # leste
+    (-1.0, 0.0, 180.0),   # sul
+    (0.0, -1.0, 270.0),   # oeste
+])
+def test_kalman_velocity_direction(vlat, vlng, expected_dir):
+    kt = klm.TKalmanTracker(0.0, 0.0, ff_vlat=vlat, ff_vlng=vlng)
+
+    speed, direction = mtn.kalman_velocity(kt, 0.0)
+
+    assert speed == pytest.approx(111.0, rel=0.01)
+    assert direction == pytest.approx(expected_dir, abs=1e-6)
+
+
+def test_kalman_velocity_longitude_shrinks_with_latitude():
+    kt = klm.TKalmanTracker(-60.0, 0.0, ff_vlng=1.0)
+
+    speed, _ = mtn.kalman_velocity(kt, -60.0)
+
+    assert speed == pytest.approx(111.0 * 0.5, rel=0.01)
+
+
+def test_kalman_velocity_stopped_filter():
+    assert mtn.kalman_velocity(klm.TKalmanTracker(0.0, 0.0), 0.0) == (0.0, 0.0)

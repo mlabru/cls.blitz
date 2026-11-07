@@ -1,0 +1,125 @@
+import csv
+
+import pytest
+
+import work.slm_struct as sst
+import work.slm_track as trk
+import work.slm_verify as vrf
+
+
+def _cell(track_id, t_start, lat=0.0, lng=0.0, forecast_path=None):
+    return sst.TCell(id=track_id, centroid=(lat, lng), size=10, t_start=t_start, t_end=t_start,
+                     forecast_path=forecast_path or [])
+
+
+def _forecast(issue_ts, lead_min, lat=0.0, lng=0.0, lat0=0.0, lng0=0.0):
+    return {"issue_ts": issue_ts, "lead_min": lead_min, "lat": lat, "lng": lng,
+            "lat0": lat0, "lng0": lng0}
+
+
+def test_register_cells_stores_forecasts_with_issue_position():
+    track = sst.TStormTrack(id="A")
+    cell = _cell("A", 1000, lat=1.0, lng=2.0,
+                 forecast_path=[{"lead_min": 10, "lat": 1.1, "lng": 2.1, "lat_std": 0.1, "lng_std": 0.1}])
+
+    vrf.register_cells([cell], [track])
+
+    assert track.forecasts == [_forecast(1000, 10, 1.1, 2.1, 1.0, 2.0)]
+
+
+def test_verify_track_matches_within_tolerance_and_computes_errors():
+    # previsão para 1 grau a leste, emitida em (0,0); célula observada em (0, 0.5)
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10, lng=1.0)])
+    tol_s = vrf.CF_VERIFY_TOLERANCE_MIN * 60
+    cell = _cell("A", 600 + tol_s, lng=0.5)
+
+    rows = vrf.verify_track(track, cell)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert set(row) == set(vrf.CLST_VERIFY_COLUMNS)
+    assert (row["track_id"], row["issue_ts"], row["lead_min"]) == ("A", 0, 10)
+    assert row["error_km"] == pytest.approx(55.6, abs=0.1)     # 0.5 grau no equador
+    assert row["persist_km"] == pytest.approx(55.6, abs=0.1)
+    assert track.forecasts == []
+
+
+def test_verify_track_keeps_future_and_drops_expired_forecasts():
+    future = _forecast(0, 30)
+    expired = _forecast(0, 10)
+    track = sst.TStormTrack(id="A", forecasts=[expired, future])
+    # 20 min depois: +10 já passou (sem célula a tempo), +30 ainda vai valer
+    cell = _cell("A", 1200)
+
+    assert vrf.verify_track(track, cell) == []
+    assert track.forecasts == [future]
+
+
+def test_verify_cells_ignores_new_tracks_and_unknown_ids():
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+
+    rows = vrf.verify_cells([_cell("X", 600), _cell("A", 600)], [track])
+
+    assert [r["track_id"] for r in rows] == ["A"]
+
+
+def test_append_rows_writes_header_once(tmp_path):
+    path = tmp_path / "verify.csv"
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10), _forecast(300, 5)])
+    rows = vrf.verify_track(track, _cell("A", 600))
+
+    vrf.append_rows(str(path), rows)
+    vrf.append_rows(str(path), rows)
+    vrf.append_rows(str(path), [])
+
+    with open(path, newline="") as fh:
+        data = list(csv.reader(fh))
+
+    assert data[0] == vrf.CLST_VERIFY_COLUMNS
+    assert len(data) == 1 + 2 * len(rows)
+
+
+def test_append_rows_rewrites_header_after_rotation(tmp_path):
+    # check_log_size (slm_run.sh) deixa o arquivo vazio depois de rotacionar
+    path = tmp_path / "verify.csv"
+    path.write_text("")
+    track = sst.TStormTrack(id="A", forecasts=[_forecast(0, 10)])
+
+    vrf.append_rows(str(path), vrf.verify_track(track, _cell("A", 600)))
+
+    assert path.read_text().splitlines()[0] == ",".join(vrf.CLST_VERIFY_COLUMNS)
+
+
+def test_append_rows_empty_does_not_create_file(tmp_path):
+    path = tmp_path / "verify.csv"
+
+    vrf.append_rows(str(path), [])
+
+    assert not path.exists()
+
+
+def test_mean_errors():
+    rows = [{"error_km": 2.0, "persist_km": 10.0}, {"error_km": 4.0, "persist_km": 20.0}]
+
+    assert vrf.mean_errors(rows) == (3.0, 15.0)
+
+
+def test_forecasts_survive_save_and_load(tmp_path):
+    path = tmp_path / "tracks.json"
+    track = sst.TStormTrack(id="A", history=[_cell("A", 0)], forecasts=[_forecast(0, 10)])
+
+    trk.save_tracks(str(path), [track], {})
+    loaded, _ = trk.load_tracks(str(path))
+
+    assert loaded[0].forecasts == [_forecast(0, 10)]
+
+
+def test_load_tracks_without_forecasts_key(tmp_path):
+    # [fix] estado gravado antes de 2026.nov não tem "forecasts"
+    path = tmp_path / "tracks.json"
+    path.write_text('{"tracks": [{"id": "A", "age_minutes": 0, "missed_frames": 0, '
+                    '"active": true, "history": []}], "kalman": {}}')
+
+    loaded, _ = trk.load_tracks(str(path))
+
+    assert loaded[0].forecasts == []

@@ -23,6 +23,8 @@ slm_tracks_state.json.  Os NOMES dos atributos de _TKalman1D (x, v, p_xx,
 p_xv, p_vv, q_pos, q_vel, r) são, portanto, o formato do arquivo: renomear um
 deles quebra a leitura de estados já gravados.
 
+2026.nov  mlabru  ruído de processo proporcional a dt (era somado uma vez por
+                  predict, fosse dt de 5 min ou de 2 h); velocity_deg_h
 2026.out  mlabru  refatoração para legibilidade: docstring do módulo (era cópia
                   da do slm_motion), predict_path inexistente tirado do "uso",
                   logs de debug removidos (rodavam a cada frame/célula)
@@ -51,6 +53,11 @@ CF_KALMAN_Q_VEL = 1e-3
 # ruído de medição (posição observada, graus²)
 CF_KALMAN_R = 1e-3
 
+# intervalo (horas) a que q_pos e q_vel se referem: o ruído de um predict é
+# q · dt / CF_KALMAN_Q_REF_DT_H.  5 min = intervalo do cron, então num frame
+# normal o filtro se comporta como antes do ruído passar a depender de dt
+CF_KALMAN_Q_REF_DT_H = 5.0 / 60.0
+
 # covariância inicial: posição pouco conhecida (1 grau²), velocidade quase nula
 CF_INITIAL_P_POSITION = 1.0
 CF_INITIAL_P_VELOCITY = 0.1
@@ -65,10 +72,10 @@ class _TKalman1D:
     a covariância P é simétrica 2x2, então bastam três números:
     p_xx (variância da posição), p_xv (covariância), p_vv (variância da velocidade).
 
-    propagação (F = [[1, dt], [0, 1]]):
-        p_xx ← p_xx + 2·dt·p_xv + dt²·p_vv + q_pos
+    propagação (F = [[1, dt], [0, 1]], s = dt / CF_KALMAN_Q_REF_DT_H):
+        p_xx ← p_xx + 2·dt·p_xv + dt²·p_vv + s·q_pos
         p_xv ← p_xv + dt·p_vv
-        p_vv ← p_vv + q_vel
+        p_vv ← p_vv + s·q_vel
 
     atualização (só a posição é medida, H = [1, 0]):
         K_x  = p_xx / (p_xx + r)
@@ -108,16 +115,23 @@ class _TKalman1D:
         """
         avança estado e covariância dt horas (velocidade constante).
 
-        :param ff_dt_h: intervalo, em horas
+        [fix] o ruído de processo é proporcional a dt: antes era somado uma
+        vez por chamada, então um intervalo de 2 h (tracker parado) ou o
+        horizonte de +30 min da previsão ganhavam a mesma incerteza extra que
+        um frame de 5 min.  dt = 0 não acrescenta ruído.
+
+        :param ff_dt_h: intervalo, em horas (negativo conta como 0 no ruído)
         """
+        lf_noise_scale = max(ff_dt_h, 0.0) / CF_KALMAN_Q_REF_DT_H
+
         self.x = self.x + self.v * ff_dt_h
 
         # os três novos valores são calculados com os valores ANTIGOS,
         # por isso a atribuição só acontece no fim
-        lf_new_p_vv = self.p_vv + self.q_vel
+        lf_new_p_vv = self.p_vv + lf_noise_scale * self.q_vel
         lf_new_p_xv = self.p_xv + ff_dt_h * self.p_vv
         lf_new_p_xx = (self.p_xx + 2.0 * ff_dt_h * self.p_xv +
-                       ff_dt_h * ff_dt_h * self.p_vv + self.q_pos)
+                       ff_dt_h * ff_dt_h * self.p_vv + lf_noise_scale * self.q_pos)
 
         self.p_xx = lf_new_p_xx
         self.p_xv = lf_new_p_xv
@@ -224,6 +238,17 @@ class TKalmanTracker:
         l_lng_copy.predict(ff_dt_h)
 
         return l_lat_copy.x, l_lng_copy.x, l_lat_copy.std, l_lng_copy.std
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    @property
+    def velocity_deg_h(self) -> tuple:
+        """
+        velocidade estimada pelo filtro (slm_motion.kalman_velocity a converte
+        em km/h e azimute).
+
+        :returns: (v_lat, v_lng), em graus/hora
+        """
+        return self._lat.v, self._lng.v
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def to_dict(self) -> dict:

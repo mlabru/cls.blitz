@@ -59,3 +59,26 @@ def test_validate_cell_requires_keys_and_valid_centroid():
     assert srr._validate_cell({"size": 1, "t_end": 1}, 0) is False
     assert srr._validate_cell({"centroid": "bad", "size": 1, "t_end": 1}, 0) is False
     assert srr._validate_cell({"centroid": [1, 2, 3], "size": 1, "t_end": 1}, 0) is False
+
+
+class _FakeAxes:
+    def __init__(self):
+        self.quivers = []
+
+    def quiver(self, *args, **kwargs):
+        self.quivers.append(args)
+
+
+@pytest.mark.parametrize("speed,drawn", [
+    (0.0, False),
+    (srr.CF_MIN_ARROW_SPEED_KMH - 0.1, False),   # Kalman quase parado: sem seta
+    (srr.CF_MIN_ARROW_SPEED_KMH, True),
+    (40.0, True),
+])
+def test_motion_arrow_only_above_min_speed(speed, drawn):
+    axes = _FakeAxes()
+
+    srr._draw_motion_arrow(axes, None, {"centroid": [0.0, 0.0], "speed_kmh": speed,
+                                        "direction_deg": 90.0})
+
+    assert bool(axes.quivers) == drawn

@@ -11,6 +11,7 @@
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
 #
+# 2026.nov  mlabru  run_slm_tracker passa --verify-file (SLM_VERIFY_FILE)
 # 2026.out  mlabru  [fix] frames ordenados com sort -V (frame_10000 depois de
 #                   frame_9999); tracker recebe --tracks-file; get_state
 #                   devolve 0 também para arquivo vazio
@@ -198,7 +199,8 @@ run_slm_mapper()
 # clusteriza e rastreia os raios novos do CSV num frame JSON (slmTracker.py).
 # O stdout do tracker é o contrato com o shell (linha "NEWEST_TS=<epoch>"
 # quando houve raios novos) e é repassado ao chamador; o stderr (o logging
-# do Python) vai para logs/slmTracker.log
+# do Python) vai para logs/slmTracker.log.  As previsões conferidas vão para
+# SLM_VERIFY_FILE
 #
 # uso: ls_output=$(run_slm_tracker <csv> <json_de_saída> <since_ts>)
 # retorno: o código de saída do slmTracker.py
@@ -212,6 +214,7 @@ run_slm_tracker()
 
     python3 "${SLM_LIB_DIR}/apps/slmTracker.py" --since-ts "${ls_since_ts}" \
             --tracks-file "${SLM_TRACKS_STATE_FILE}" \
+            --verify-file "${SLM_VERIFY_FILE}" \
             "${ls_csv}" "${ls_json}" 2>> "${SLM_LOGS}/slmTracker.log" || li_rc=$?
 
     return "${li_rc}"

@@ -1,3 +1,4 @@
+import csv
 import json
 
 import pytest
@@ -233,3 +234,41 @@ def test_process_expired_track_does_not_inherit_cell(tmp_path):
     _, frame3 = _run(tmp_path, rows3, since_ts=1000 + li_gap_s + 60, name="frame3.json")
 
     assert frame3[0]["id"] == frame2[0]["id"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# verificação das previsões ponta a ponta (2026.nov)
+
+def test_process_verifies_previous_forecasts(tmp_path):
+    verify_path = tmp_path / "verify.csv"
+    tracks_path = tmp_path / "tracks.json"
+    n = trkmod.CI_MIN_PTS
+
+    # uma célula parada, um frame a cada 5 min (t_start avança 300 s por frame,
+    # porque cada frame só tem os raios daquele minuto)
+    for i in range(4):
+        ts = 1000 + 300 * i
+        csv_path = tmp_path / f"raw{i}.csv"
+        _write_csv(csv_path, [(ts, 0.0, 0.0)] * n)
+        trkmod.process(str(csv_path), str(tmp_path / f"f{i}.json"), 0.0,
+                       str(tracks_path), str(verify_path))
+
+    with open(verify_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    # +10 emitida em 1000 e em 1300 vale em 1600 e 1900; +20 de 1000 vale em 2200 (não chegou)
+    assert sorted((float(r["issue_ts"]), int(r["lead_min"])) for r in rows) == [(1000, 10), (1300, 10)]
+    assert all(float(r["error_km"]) == pytest.approx(0.0, abs=1e-3) for r in rows)
+
+    # a +20 de 1000 e as de 1300/1600/1900 que ainda valem continuam pendentes
+    state = json.loads(tracks_path.read_text())
+    pending = {(f["issue_ts"], f["lead_min"]) for f in state["tracks"][0]["forecasts"]}
+    assert (1000, 20) in pending and (1900, 10) in pending
+
+
+def test_process_without_verify_file_writes_nothing(tmp_path):
+    rows = [(1000, 0.0, 0.0)] * trkmod.CI_MIN_PTS
+
+    _run(tmp_path, rows, since_ts=0)
+
+    assert not list(tmp_path.glob("*.csv"))[1:]   # só o raw.csv
