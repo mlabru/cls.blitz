@@ -19,6 +19,8 @@ fluxo (dbscan_spatial):
 regra do projeto: distância sempre com haversine_km, nunca com a diferença
 de lat/lng em graus (ver slm_geo).
 
+2026.nov  mlabru  eps/min_pts obrigatórios (os padrões daqui, 20 km, divergiam
+                  dos do slmTracker, 12 km)
 2026.nov  mlabru  parâmetros de algoritmo lidos na chamada, não na definição
                   (padrão None): o slmReplay sobrescreve as constantes
 2026.nov  mlabru  [fix] raio de borda entra em UM cluster só (o primeiro que o
@@ -42,33 +44,23 @@ import work.slm_geo as geo
 import work.slm_spcgrid as sgr
 import work.slm_struct as sst
 
-# < constants >────────────────────────────────────────────────────────────────────────
-
-# valores padrão do DBSCAN quando o chamador não informa
-# (o slmTracker sempre informa os seus: CF_EPS_KM e CI_MIN_PTS)
-CF_DEFAULT_EPS_KM = 20.0
-CI_DEFAULT_MIN_PTS = 10
-
 # ─────────────────────────────────────────────────────────────────────────────────────
-def dbscan_spatial(flst_events: list,
-                   ff_eps_km: float | None = None,
-                   fi_min_pts: int | None = None) -> list:
+def dbscan_spatial(flst_events: list, ff_eps_km: float, fi_min_pts: int) -> list:
     """
     agrupa raios em clusters por densidade (DBSCAN com índice em grade).
 
+    [fix] eps e min_pts são obrigatórios: havia padrões próprios aqui
+    (20 km / 10) diferentes dos do slmTracker (12 km / 10), que sempre informa
+    os seus; um --set nos padrões daqui era aceito pelo slmReplay e não mudava
+    nada.  A fonte única é slmTracker.CF_EPS_KM / CI_MIN_PTS.
+
     :param flst_events: lista de TLightning
-    :param ff_eps_km: raio de vizinhança, em km (None = CF_DEFAULT_EPS_KM)
+    :param ff_eps_km: raio de vizinhança, em km
     :param fi_min_pts: mínimo de vizinhos (contando o próprio ponto) para ser
-                       ponto central (None = CI_DEFAULT_MIN_PTS)
+                       ponto central
     :returns: lista de clusters; cada cluster é uma lista de TLightning.
               Raios de ruído não aparecem em nenhum cluster.
     """
-    if ff_eps_km is None:
-        ff_eps_km = CF_DEFAULT_EPS_KM
-
-    if fi_min_pts is None:
-        fi_min_pts = CI_DEFAULT_MIN_PTS
-
     l_grid = _build_grid(flst_events, ff_eps_km)
 
     # pontos já visitados e pontos já colocados num cluster, por id()

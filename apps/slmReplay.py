@@ -37,7 +37,8 @@ exemplos:
     python3 apps/slmReplay.py --report-only -o $SLM_PATH/data/state
 
 --set aceita MÓDULO.CONSTANTE=VALOR para as constantes CF_/CI_/CT_ de
-slmTracker, slm_track, slm_kalman, slm_motion, slm_verify e slm_spatial.  Os
+slmTracker, slm_track, slm_kalman, slm_motion e slm_verify (o DBSCAN é
+slmTracker.CF_EPS_KM / CI_MIN_PTS).  Os
 módulos leem esses valores na chamada (test_slmReplay garante), então a
 troca vale para tudo o que o tracker faz.  Atenção: os ruídos do Kalman são
 gravados em cada filtro; num estado já existente valem os gravados -- o
@@ -67,7 +68,6 @@ import work.slm_archive as arc
 import work.slm_kalman as klm
 import work.slm_motion as mtn
 import work.slm_report as rpt
-import work.slm_spatial as spc
 import work.slm_track as trk
 import work.slm_verify as vrf
 
@@ -80,7 +80,6 @@ CDCT_TUNABLE_MODULES = {
     "slm_kalman":  klm,
     "slm_motion":  mtn,
     "slm_verify":  vrf,
-    "slm_spatial": spc,
 }
 
 # só constantes numéricas de algoritmo (CF_ float, CI_ int, CT_ tupla)

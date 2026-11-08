@@ -35,7 +35,7 @@ def test_dbscan_spatial_separates_cluster_from_noise():
 
 
 def test_dbscan_spatial_empty_input():
-    assert spc.dbscan_spatial([]) == []
+    assert spc.dbscan_spatial([], ff_eps_km=5.0, fi_min_pts=5) == []
 
 
 def test_region_query_within_radius():
