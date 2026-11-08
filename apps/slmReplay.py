@@ -28,8 +28,8 @@ exemplos:
     python3 apps/slmReplay.py -o /tmp/rp/base data/archive/slm_raw_2026110[67].csv.gz
 
     # grade de um parâmetro
-    for q in 3e-4 1e-3 3e-3; do
-        python3 apps/slmReplay.py -o /tmp/rp/qvel_$q --set slm_kalman.CF_KALMAN_Q_VEL=$q \\
+    for q in 2.0 3.5 6.0; do
+        python3 apps/slmReplay.py -o /tmp/rp/qvel_$q --set slm_kalman.CF_KALMAN_Q_VEL_STD_KMH=$q \\
                 data/archive/slm_raw_20261106.csv.gz
     done
 

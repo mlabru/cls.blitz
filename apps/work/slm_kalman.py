@@ -23,6 +23,14 @@ slm_tracks_state.json.  Os NOMES dos atributos de _TKalman1D (x, v, p_xx,
 p_xv, p_vv, q_pos, q_vel, r) são, portanto, o formato do arquivo: renomear um
 deles quebra a leitura de estados já gravados.
 
+unidades: o estado está em graus, mas os ruídos são dados em km (constantes
+CF_*_STD_KM/_KMH) e cada eixo os converte pela sua escala km/grau na criação
+do filtro (a da longitude na latitude de nascimento do track).  Assim o filtro
+é isotrópico em km: um grau de longitude a 33°S tem só 84% de um de latitude.
+q_pos/q_vel/r gravados continuam em graus², então estados antigos valem.
+
+2026.nov  mlabru  ruídos em km, convertidos por eixo (eram graus² iguais nos dois
+                  eixos: a longitude ficava com ruído menor em km)
 2026.nov  mlabru  filtro novo com variância da posição = r (era 1 grau², ~111 km)
 2026.nov  mlabru  nis (inovação normalizada, diagnóstico da associação); ruídos
                   padrão lidos na criação do filtro (o slmReplay sobrescreve
@@ -45,28 +53,46 @@ from __future__ import annotations
 import copy
 import math
 
+# locals
+import work.slm_geo as geo
+
 # < constants >────────────────────────────────────────────────────────────────────────
 
-# ruído de processo (posição, graus²) -- quanto maior, mais rápido o filtro
-# "esquece" o histórico e confia na medição mais recente; controla, junto com
-# CF_KALMAN_Q_VEL/CF_KALMAN_R, o quanto o cone de previsão (forecast_cone em
-# slmRender.py) e as elipses de incerteza se alargam com o horizonte de
-# previsão.  Sem passagem empírica de ajuste -- valores herdados da versão
-# inicial do filtro.
-CF_KALMAN_Q_POS = 1e-4
-# ruído de processo (velocidade, (graus/hora)²)
-CF_KALMAN_Q_VEL = 1e-3
-# ruído de medição (posição observada, graus²)
-CF_KALMAN_R = 1e-3
+# ruídos em DESVIO-PADRÃO, em km e km/h (cada eixo converte para graus na
+# criação do filtro, ver _TKalman1D.__init__).  Controlam o ganho do filtro (a
+# razão Q/R) e a largura do cone de previsão e das elipses do slmRender (a
+# escala comum).  Os valores são os antigos em graus (1e-4, 1e-3, 1e-3 graus²)
+# convertidos a 111 km/grau; ainda sem ajuste empírico (guia, seção 10).
+
+# ruído de processo da posição, por CF_KALMAN_Q_REF_DT_H (km)
+CF_KALMAN_Q_POS_STD_KM = 1.11
+# ruído de processo da velocidade, por CF_KALMAN_Q_REF_DT_H (km/h)
+CF_KALMAN_Q_VEL_STD_KMH = 3.51
+# ruído de medição (posição do centroide, km)
+CF_KALMAN_R_STD_KM = 3.51
 
 # intervalo (horas) a que q_pos e q_vel se referem: o ruído de um predict é
 # q · dt / CF_KALMAN_Q_REF_DT_H.  5 min = intervalo do cron, então num frame
 # normal o filtro se comporta como antes do ruído passar a depender de dt
 CF_KALMAN_Q_REF_DT_H = 5.0 / 60.0
 
-# covariância inicial da velocidade ((graus/hora)², ~35 km/h de sigma); a da
-# posição é r, porque o filtro nasce numa posição medida (ver _TKalman1D.__init__)
-CF_INITIAL_P_VELOCITY = 0.1
+# incerteza inicial da velocidade (km/h); a da posição é a da medida (r),
+# porque o filtro nasce numa posição medida (ver _TKalman1D.__init__)
+CF_INITIAL_VEL_STD_KMH = 35.1
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _deg_var(ff_std_km: float, ff_km_per_deg: float) -> float:
+    """
+    converte um desvio-padrão em km (ou km/h) na variância em graus² (ou
+    (graus/hora)²) de um eixo.
+
+    :param ff_std_km: desvio-padrão em km (ou km/h)
+    :param ff_km_per_deg: km por grau do eixo
+    :returns: variância em graus² (ou (graus/hora)²)
+    """
+    lf_std_deg = ff_std_km / ff_km_per_deg
+
+    return lf_std_deg * lf_std_deg
 
 # < _TKalman1D >───────────────────────────────────────────────────────────────────────
 
@@ -95,26 +121,33 @@ class _TKalman1D:
     # ─────────────────────────────────────────────────────────────────────────────────
     def __init__(self, x0: float, v0: float = 0.0,
                  q_pos: float | None = None, q_vel: float | None = None,
-                 r: float | None = None):
+                 r: float | None = None, ff_km_per_deg: float | None = None):
         """
         cria o filtro numa posição conhecida.
 
         [fix] os padrões (None) são lidos das constantes NA CRIAÇÃO, não na
         definição da função: assim o slmReplay consegue trocar
-        CF_KALMAN_Q_POS/Q_VEL/R e o filtro novo usa o valor trocado.
+        CF_KALMAN_*_STD_* e o filtro novo usa o valor trocado.
+
+        [fix] os ruídos vinham em graus², iguais nos dois eixos: em km, o da
+        longitude saía menor (cos(lat)), e o cone ficava estreito no leste-oeste.
+        Agora as constantes estão em km e são convertidas pela escala deste eixo.
 
         :param x0: posição inicial (graus)
         :param v0: velocidade inicial (graus/hora)
-        :param q_pos: ruído de processo da posição (None = CF_KALMAN_Q_POS)
-        :param q_vel: ruído de processo da velocidade (None = CF_KALMAN_Q_VEL)
-        :param r: ruído de medição (None = CF_KALMAN_R)
+        :param q_pos: ruído de processo da posição, graus² (None = das constantes)
+        :param q_vel: ruído de processo da velocidade, (graus/hora)² (idem)
+        :param r: ruído de medição, graus² (idem)
+        :param ff_km_per_deg: km por grau deste eixo (None = geo.CF_KM_PER_DEG_LAT)
         """
+        lf_km_per_deg = geo.CF_KM_PER_DEG_LAT if ff_km_per_deg is None else ff_km_per_deg
+
         self.x = x0
         self.v = v0
 
-        self.q_pos = CF_KALMAN_Q_POS if q_pos is None else q_pos
-        self.q_vel = CF_KALMAN_Q_VEL if q_vel is None else q_vel
-        self.r = CF_KALMAN_R if r is None else r
+        self.q_pos = _deg_var(CF_KALMAN_Q_POS_STD_KM, lf_km_per_deg) if q_pos is None else q_pos
+        self.q_vel = _deg_var(CF_KALMAN_Q_VEL_STD_KMH, lf_km_per_deg) if q_vel is None else q_vel
+        self.r = _deg_var(CF_KALMAN_R_STD_KM, lf_km_per_deg) if r is None else r
 
         # [fix] p_xx era CF_INITIAL_P_POSITION (1 grau², ~111 km de sigma): a
         # 1a previsão de todo track novo saía com elipses de ~4,5 graus no render
@@ -122,7 +155,7 @@ class _TKalman1D:
         # então a variância da posição é a da medida
         self.p_xx = self.r
         self.p_xv = 0.0
-        self.p_vv = CF_INITIAL_P_VELOCITY
+        self.p_vv = _deg_var(CF_INITIAL_VEL_STD_KMH, lf_km_per_deg)
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def predict(self, ff_dt_h: float) -> None:
@@ -191,7 +224,8 @@ class _TKalman1D:
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @classmethod
-    def from_two_points(cls, ff_x1: float, ff_x2: float, ff_dt_h: float) -> _TKalman1D:
+    def from_two_points(cls, ff_x1: float, ff_x2: float, ff_dt_h: float,
+                        ff_km_per_deg: float | None = None) -> _TKalman1D:
         """
         filtro iniciado por duas posições medidas ff_dt_h horas uma da outra
         (inicialização de dois pontos):
@@ -205,9 +239,10 @@ class _TKalman1D:
         :param ff_x1: posição anterior (graus)
         :param ff_x2: posição atual (graus)
         :param ff_dt_h: intervalo entre as duas, em horas (> 0)
+        :param ff_km_per_deg: km por grau deste eixo (None = geo.CF_KM_PER_DEG_LAT)
         :returns: novo filtro, com os ruídos padrão do módulo
         """
-        l_filter = cls(ff_x2, (ff_x2 - ff_x1) / ff_dt_h)
+        l_filter = cls(ff_x2, (ff_x2 - ff_x1) / ff_dt_h, ff_km_per_deg=ff_km_per_deg)
 
         l_filter.p_xx = l_filter.r
         l_filter.p_xv = l_filter.r / ff_dt_h
@@ -252,7 +287,7 @@ class TKalmanTracker:
         :param ff_vlng: velocidade inicial em longitude (graus/hora)
         """
         self._lat = _TKalman1D(ff_lat0, ff_vlat)
-        self._lng = _TKalman1D(ff_lng0, ff_vlng)
+        self._lng = _TKalman1D(ff_lng0, ff_vlng, ff_km_per_deg=geo.km_per_deg_lng(ff_lat0))
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @classmethod
@@ -273,7 +308,8 @@ class TKalmanTracker:
         """
         l_tracker = cls.__new__(cls)
         l_tracker._lat = _TKalman1D.from_two_points(ft_pos1[0], ft_pos2[0], ff_dt_h)
-        l_tracker._lng = _TKalman1D.from_two_points(ft_pos1[1], ft_pos2[1], ff_dt_h)
+        l_tracker._lng = _TKalman1D.from_two_points(ft_pos1[1], ft_pos2[1], ff_dt_h,
+                                                    geo.km_per_deg_lng(ft_pos2[0]))
 
         return l_tracker
 

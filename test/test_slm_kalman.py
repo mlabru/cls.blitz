@@ -1,5 +1,6 @@
 import pytest
 
+import work.slm_geo as geo
 import work.slm_kalman as klm
 
 
@@ -41,8 +42,21 @@ def test_new_tracker_position_sigma_is_measurement_noise():
 
     _, _, lat_std, lng_std = kt.predict_position(0.0)
 
-    assert lat_std == pytest.approx(klm.CF_KALMAN_R ** 0.5)
-    assert lng_std == pytest.approx(klm.CF_KALMAN_R ** 0.5)
+    assert lat_std * geo.CF_KM_PER_DEG_LAT == pytest.approx(klm.CF_KALMAN_R_STD_KM)
+    assert lng_std * geo.km_per_deg_lng(-23.0) == pytest.approx(klm.CF_KALMAN_R_STD_KM)
+
+
+@pytest.mark.parametrize("lat0", [0.0, -15.0, -33.0])
+def test_tracker_noise_is_isotropic_in_km(lat0):
+    # [fix] com ruído igual em graus², o sigma em km da longitude saía cos(lat) menor
+    kt = klm.TKalmanTracker(lat0, -50.0)
+    for _ in range(4):
+        kt.predict(5.0 / 60.0)
+        kt.update(lat0, -50.0)
+
+    _, _, lat_std, lng_std = kt.predict_position(0.5)
+
+    assert lat_std * geo.CF_KM_PER_DEG_LAT == pytest.approx(lng_std * geo.km_per_deg_lng(lat0))
 
 
 def test_kalman_tracker_predict_position_does_not_mutate_state():
@@ -79,9 +93,11 @@ def _p_after(dt_h):
 
 def test_kalman1d_process_noise_scales_with_dt():
     ref = klm.CF_KALMAN_Q_REF_DT_H
+    q_pos = (klm.CF_KALMAN_Q_POS_STD_KM / geo.CF_KM_PER_DEG_LAT) ** 2
+    q_vel = (klm.CF_KALMAN_Q_VEL_STD_KMH / geo.CF_KM_PER_DEG_LAT) ** 2
 
-    assert _p_after(ref) == pytest.approx((klm.CF_KALMAN_Q_POS, klm.CF_KALMAN_Q_VEL))
-    assert _p_after(4 * ref) == pytest.approx((4 * klm.CF_KALMAN_Q_POS, 4 * klm.CF_KALMAN_Q_VEL))
+    assert _p_after(ref) == pytest.approx((q_pos, q_vel))
+    assert _p_after(4 * ref) == pytest.approx((4 * q_pos, 4 * q_vel))
 
 
 def test_kalman1d_zero_dt_adds_no_noise():
@@ -114,7 +130,7 @@ def test_kalman1d_from_two_points_state_and_covariance():
     assert k.x == 1.1
     assert k.v == pytest.approx(0.1 / dt)
     assert (k.p_xx, k.p_xv, k.p_vv) == pytest.approx((k.r, k.r / dt, 2.0 * k.r / dt ** 2))
-    assert (k.q_pos, k.q_vel) == (klm.CF_KALMAN_Q_POS, klm.CF_KALMAN_Q_VEL)
+    assert (k.q_pos, k.q_vel) == (klm._TKalman1D(0.0).q_pos, klm._TKalman1D(0.0).q_vel)
 
 
 def test_kalman_tracker_from_two_points_extrapolates_the_displacement():
@@ -180,10 +196,10 @@ def test_nis_does_not_change_state():
 
 
 def test_noise_defaults_read_when_filter_is_created(monkeypatch):
-    monkeypatch.setattr(klm, "CF_KALMAN_R", 0.5)
-    monkeypatch.setattr(klm, "CF_KALMAN_Q_VEL", 0.25)
+    monkeypatch.setattr(klm, "CF_KALMAN_R_STD_KM", 5.0)
+    monkeypatch.setattr(klm, "CF_KALMAN_Q_VEL_STD_KMH", 10.0)
 
-    k = klm._TKalman1D(0.0)
+    k = klm._TKalman1D(0.0, ff_km_per_deg=100.0)
 
-    assert (k.r, k.q_vel) == (0.5, 0.25)
+    assert (k.r, k.q_vel) == pytest.approx((0.05 ** 2, 0.1 ** 2))
     assert klm._TKalman1D(0.0, r=0.1).r == 0.1

@@ -182,11 +182,11 @@ def test_main_writes_report_with_overrides(tmp_path, capsys, monkeypatch):
 
 
 def test_main_kalman_override_changes_cone(tmp_path, monkeypatch):
-    monkeypatch.setattr(klm, "CF_KALMAN_R", klm.CF_KALMAN_R)
+    monkeypatch.setattr(klm, "CF_KALMAN_R_STD_KM", klm.CF_KALMAN_R_STD_KM)
     raw = _moving_cell_csv(tmp_path / "raw.csv", minutes=60)
 
     rp.main(["-o", str(tmp_path / "a"), raw])
-    rp.main(["-o", str(tmp_path / "b"), "--set", "slm_kalman.CF_KALMAN_R=0.01", raw])
+    rp.main(["-o", str(tmp_path / "b"), "--set", "slm_kalman.CF_KALMAN_R_STD_KM=11.1", raw])
 
     # a última linha: filtro já convergido
     std_a = float(_read(tmp_path / "a" / rpt.CS_VERIFY_NAME)[-1]["std_lat_km"])
