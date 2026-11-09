@@ -25,4 +25,7 @@ tst_env/
 *.db-wal
 
 # intermediários por execução (VOL_TEMP; ex: PNGs do volViewer em data/temp/viewer)
+data/output/
+data/raw/
+data/state/
 data/temp/
