@@ -1,2 +1,3 @@
 frame_ts,run_ts,latency_s,n_window_events,n_clustered,n_cells,n_continued,n_two_point,n_new,n_split,n_missed,n_merged,n_expired,n_active
 1794084360.0,1794085272.901,912.901,11934,7200,223,0,0,223,0,0,0,0,223
+1794104580.0,1794105290.228,710.228,11734,9581,175,0,0,175,0,0,0,223,175
