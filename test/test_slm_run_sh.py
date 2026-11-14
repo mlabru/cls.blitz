@@ -44,7 +44,7 @@ with lpth.open("a") as lfh:
     lfh.write("{name}|" + os.getcwd() + "|" + " ".join(sys.argv[1:]) + "\\n")
 largs = sys.argv[1:]
 if 0 == {rc}:
-    if "slmDownloader" == "{name}":
+    if "{name}".endswith("Downloader"):
         ldir = largs[largs.index("-s") + 1]
         lfile = largs[largs.index("-f") + 1]
         with open(os.path.join(ldir, lfile), "a") as lfh:
@@ -68,11 +68,15 @@ touch "${@: -1}"
 # nomes dos programas Python chamados pelo slm_run.sh
 CLST_APPS = ["slmDownloader", "slmMapper", "slmTracker", "slmRender"]
 
+# os mesmos com a fonte GLM (SLM_SOURCE=glm)
+CLST_APPS_GLM = ["slmGlmDownloader", "slmMapper", "slmTracker", "slmRender"]
+
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None or shutil.which("flock") is None,
                                 reason="bash/flock indisponíveis")
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _env(fpth_home: pathlib.Path, fpth_proj: pathlib.Path | None = None) -> dict:
+def _env(fpth_home: pathlib.Path, fpth_proj: pathlib.Path | None = None,
+         fs_source: str | None = None) -> dict:
     """
     ambiente dos subprocessos: HOME isolado (sem ~/.venv), sem PYTHONPATH,
     SLM_* ou MET_* herdados; com o ffmpeg falso no PATH e SLM_PATH no projeto
@@ -84,6 +88,9 @@ def _env(fpth_home: pathlib.Path, fpth_proj: pathlib.Path | None = None) -> dict
     if fpth_proj is not None:
         ldct_env["SLM_PATH"] = str(fpth_proj)
         ldct_env["PATH"] = str(fpth_proj / "bin") + os.pathsep + ldct_env.get("PATH", "")
+
+    if fs_source is not None:
+        ldct_env["SLM_SOURCE"] = fs_source
 
     return ldct_env
 
@@ -102,7 +109,7 @@ def _project(fpth_tmp: pathlib.Path, fdct_rc: dict | None = None) -> pathlib.Pat
     for ls_file in (CS_SCRIPT, "slm_cfg.sh", "slm_common.sh", "cls_common.sh"):
         shutil.copy(MPTH_ROOT / ls_file, lpth_proj / ls_file)
 
-    for ls_name in CLST_APPS:
+    for ls_name in CLST_APPS + CLST_APPS_GLM[:1]:
         ls_code = CS_FAKE_APP.format(name=ls_name, rc=ldct_rc.get(ls_name, 0))
         (lpth_proj / "apps" / f"{ls_name}.py").write_text(ls_code)
 
@@ -113,13 +120,14 @@ def _project(fpth_tmp: pathlib.Path, fdct_rc: dict | None = None) -> pathlib.Pat
     return lpth_proj
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _run(fpth_proj: pathlib.Path, flst_prefix: tuple = ()) -> subprocess.CompletedProcess:
+def _run(fpth_proj: pathlib.Path, flst_prefix: tuple = (),
+         fs_source: str | None = None) -> subprocess.CompletedProcess:
     """
     roda o main do script copiado (de outro diretório, para provar o cd)
     """
     return subprocess.run([*flst_prefix, "bash", str(fpth_proj / CS_SCRIPT)],
                           capture_output=True, text=True,
-                          env=_env(fpth_proj.parent, fpth_proj), cwd=fpth_proj.parent)
+                          env=_env(fpth_proj.parent, fpth_proj, fs_source), cwd=fpth_proj.parent)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _source(fs_body: str, fpth_proj: pathlib.Path) -> subprocess.CompletedProcess:
@@ -262,13 +270,13 @@ class TestMain:
         assert (f"-f slm_lightning.csv -s {lpth_data}/raw "
                 f"-a {lpth_data}/archive") == ldct_args["slmDownloader"]
         assert ldct_args["slmMapper"].startswith(f"-s {lpth_data}/output -f {lpth_data}/temp/tmp.")
-        assert (f"--since-ts 0 --tracks-file {lpth_data}/state/slm_tracks_state.json "
+        assert (f"--since-ts 0 --source stsc --tracks-file {lpth_data}/state/slm_tracks_state.json "
                 f"--verify-file {lpth_data}/state/slm_verification.csv "
                 f"--assoc-file {lpth_data}/state/slm_assoc.csv "
                 f"--frames-file {lpth_data}/state/slm_frames.csv "
                 f"{lpth_data}/raw/slm_lightning.csv "
                 f"{lpth_data}/temp/json/frame_0000.json") == ldct_args["slmTracker"]
-        assert (f"{lpth_data}/temp/json/frame_0000.json "
+        assert (f"--source stsc {lpth_data}/temp/json/frame_0000.json "
                 f"{lpth_data}/temp/png/frame_0000.png") == ldct_args["slmRender"]
 
         # estado avançado e produtos publicados
@@ -281,6 +289,33 @@ class TestMain:
         assert "slm_run: iniciando" in ls_log
         assert "slm_run: execução concluída." in ls_log
         assert "[error]" not in ls_log and "[warn]" not in ls_log
+
+    def test_fonte_glm_usa_o_downloader_e_os_diretorios_dela(self, tmp_path):
+        lpth_proj = _project(tmp_path)
+
+        lproc = _run(lpth_proj, fs_source="glm")
+
+        assert 0 == lproc.returncode, lproc.stderr
+        assert CLST_APPS_GLM + ["ffmpeg"] * 3 == _names(lpth_proj)
+        ldct_args = {lt[0]: lt[2] for lt in _calls(lpth_proj) if "ffmpeg" != lt[0]}
+        lpth_data = lpth_proj / "data_glm"
+        assert (f"-f slm_lightning.csv -s {lpth_data}/raw "
+                f"-a {lpth_data}/archive") == ldct_args["slmGlmDownloader"]
+        assert ldct_args["slmTracker"].startswith("--since-ts 0 --source glm ")
+        assert ldct_args["slmRender"].startswith("--source glm ")
+        # nada do STSC é tocado: data/ e logs/ dele não existem
+        assert (lpth_data / "output" / "slm_out.png").exists()
+        assert (lpth_proj / "logs_glm" / "slmGlmDownloader.log").exists()
+        assert not (lpth_proj / "data").exists() and not (lpth_proj / "logs").exists()
+
+    def test_fonte_invalida_falha_antes_de_tudo(self, tmp_path):
+        lpth_proj = _project(tmp_path)
+
+        lproc = _run(lpth_proj, fs_source="xyz")
+
+        assert 0 != lproc.returncode
+        assert "SLM_SOURCE inválida" in lproc.stderr
+        assert [] == _calls(lpth_proj)
 
     def test_segunda_rodada_usa_o_estado(self, tmp_path):
         lpth_proj = _project(tmp_path)

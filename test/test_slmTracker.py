@@ -7,10 +7,20 @@ import work.slm_struct as sst
 import slmTracker as trkmod
 
 
+# testes com ts contínuos (fonte de descargas): janela em minutos, não em imagens
+continuous_window = pytest.mark.usefixtures("minutes_window")
+
+
+@pytest.fixture
+def minutes_window(monkeypatch):
+    monkeypatch.setattr(trkmod, "CI_WINDOW_IMAGES", 0)
+
+
 def _mk(ts, amp=1.0, polarity=1, kind="CG"):
     return sst.TLightning(ts=ts, lat=0.0, lng=0.0, amp=amp, polarity=polarity, kind=kind)
 
 
+@continuous_window
 def test_cluster_window_forms_single_cluster():
     n = trkmod.CI_MIN_PTS
     events = [_mk(1000.0 + i) for i in range(n)]
@@ -103,6 +113,7 @@ def test_export_frame_writes_expected_fields(tmp_path):
     assert "severity_index" not in data[0]
 
 
+@continuous_window
 def test_process_creates_frame_and_persists_track_across_calls(tmp_path):
     n = trkmod.CI_MIN_PTS
 
@@ -176,6 +187,7 @@ def _run(tmp_path, rows, since_ts, name="frame.json"):
     return newest, frame
 
 
+@continuous_window
 def test_process_clusters_old_and_new_events_of_the_window(tmp_path):
     # [fix] antes só os eventos novos eram agrupados: 6 + 6 não formavam célula
     rows = [(1000, 0.0, 0.0)] * 6 + [(1060 + i, 0.0, 0.0) for i in range(6)]
@@ -201,6 +213,7 @@ def test_process_keeps_late_strikes_of_the_last_minute(tmp_path):
     assert frame[0]["size"] == 2 * trkmod.CI_MIN_PTS + 3
 
 
+@continuous_window
 def test_process_window_excludes_events_older_than_window(tmp_path):
     li_window_s = trkmod.CI_WINDOW_MINUTES * 60
     rows = [(1000, 0.0, 0.0)] * 20 + [(1000 + li_window_s + 60, 0.0, 0.0)] * trkmod.CI_MIN_PTS
@@ -508,6 +521,7 @@ def test_process_forecast_points_carry_sigma_to_pending(tmp_path):
     assert all(f["lat_std"] > 0.0 and f["lng_std"] > 0.0 for f in pending)
 
 
+@continuous_window
 def test_cluster_window_reads_window_at_call_time(monkeypatch):
     events = ([_mk(0) for _ in range(trkmod.CI_MIN_PTS)] +
               [_mk(600) for _ in range(trkmod.CI_MIN_PTS)])
@@ -516,3 +530,85 @@ def test_cluster_window_reads_window_at_call_time(monkeypatch):
     cells = trkmod.cluster_window(events)
 
     assert [c.size for c in cells] == [trkmod.CI_MIN_PTS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# janela em imagens (STSC: cada ts distinto é uma imagem)
+
+def _image(ts, n=trkmod.CI_MIN_PTS):
+    return [sst.TLightning(ts=ts, lat=0.0, lng=0.0) for _ in range(n)]
+
+
+def test_image_window_keeps_last_n_images():
+    # 6 imagens a cada 6 min: só as 4 últimas entram
+    events = [l_event for li in range(6) for l_event in _image(li * 360.0)]
+
+    window = trkmod._select_time_window(events)
+
+    assert sorted({l_event.ts for l_event in window}) == [720.0, 1080.0, 1440.0, 1800.0]
+
+
+def test_image_window_size_does_not_depend_on_image_spacing():
+    # [fix] com janela de 20 min, imagens a 9 min davam 3 imagens e a 6 min, 4
+    regular = [l_event for li in range(6) for l_event in _image(li * 360.0)]
+    irregular = [l_event for li in range(6) for l_event in _image(li * 540.0)]
+
+    assert len(trkmod._select_time_window(regular)) == len(trkmod._select_time_window(irregular))
+
+
+def test_image_window_never_spans_more_than_max(monkeypatch):
+    # falha de imagens: a imagem anterior tem 1 h, fica fora da janela
+    monkeypatch.setattr(trkmod, "CF_WINDOW_MAX_SPAN_MIN", 30.0)
+    events = _image(0.0) + _image(3600.0) + _image(3960.0)
+
+    window = trkmod._select_time_window(events)
+
+    assert sorted({l_event.ts for l_event in window}) == [3600.0, 3960.0]
+
+
+def test_image_window_reads_constant_at_call_time(monkeypatch):
+    events = _image(0.0) + _image(360.0)
+    monkeypatch.setattr(trkmod, "CI_WINDOW_IMAGES", 1)
+
+    cells = trkmod.cluster_window(events)
+
+    assert [c.size for c in cells] == [trkmod.CI_MIN_PTS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# fonte dos eventos (--source)
+
+def test_window_images_for_each_source(monkeypatch):
+    monkeypatch.setattr(trkmod, "CI_WINDOW_IMAGES", 3)
+
+    assert trkmod.window_images_for(None) == 3
+    assert trkmod.window_images_for("stsc") == 3
+    assert trkmod.window_images_for("glm") == 0
+    with pytest.raises(ValueError):
+        trkmod.window_images_for("xyz")
+
+
+def test_process_glm_source_uses_minutes_window(tmp_path):
+    # flashes contínuos: 30 ts distintos em 1 min; no modo STSC (4 imagens)
+    # só os 4 últimos entrariam e não haveria célula
+    rows = [(1000 + 2 * i, 0.0, 0.0) for i in range(30)]
+    csv_path = tmp_path / "raw.csv"
+    _write_csv(csv_path, rows)
+    json_path = tmp_path / "frame.json"
+
+    trkmod.process(str(csv_path), str(json_path), 0, str(tmp_path / "tracks.json"),
+                   fs_source="glm")
+
+    assert [c["size"] for c in json.loads(json_path.read_text())] == [30]
+
+
+def test_main_accepts_source_and_rejects_unknown(tmp_path, capsys):
+    csv_path = tmp_path / "raw.csv"
+    _write_csv(csv_path, [(1000 + i, 0.0, 0.0) for i in range(trkmod.CI_MIN_PTS)])
+    args = [str(csv_path), str(tmp_path / "f.json"), "--tracks-file", str(tmp_path / "t.json"),
+            "--verify-file", "", "--assoc-file", "", "--frames-file", ""]
+
+    assert trkmod.main(args + ["--source", "glm"]) == trkmod.CI_RC_OK
+    assert "NEWEST_TS=" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        trkmod.main(args + ["--source", "xyz"])

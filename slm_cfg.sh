@@ -13,6 +13,8 @@
 # sempre "source"ado, nunca executado -- não define "set -e": herda as
 # opções de shell de quem importa.
 #
+# 2026.nov  mlabru  SLM_SOURCE (stsc/glm): escolhe o downloader (SLM_DOWNLOADER)
+#                   e separa data/ e logs/ da GLM (SLM_SOURCE_TAG)
 # 2026.nov  mlabru  SLM_ASSOC_FILE/SLM_FRAMES_FILE (diagnóstico do tracker) e
 #                   SLM_ARCHIVE (arquivo diário dos raios, para o slmReplay)
 # 2026.nov  mlabru  SLM_VERIFY_FILE (CSV de verificação, passado ao tracker)
@@ -43,9 +45,26 @@ SLM_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # exportado (cron, systemd): usa id -un para não quebrar sob 'set -u'
 SLM_PATH="${SLM_PATH:-/home/${USER:-$(id -un)}/Public/bltz}"
 
+# fonte dos eventos, sobreponível pelo ambiente (no crontab: SLM_SOURCE=glm):
+#   stsc -> REDEMET STSC, células de grade CB por imagem (slmDownloader.py)
+#   glm  -> GOES-19 GLM, flashes contínuos (slmGlmDownloader.py)
+# o tracker e o render recebem --source (janela de agrupamento, HUD).  A GLM
+# grava em data_glm/ e logs_glm/: CSV, estado dos tracks e archive das duas
+# fontes nunca se misturam, e as duas podem rodar ao mesmo tempo
+SLM_SOURCE="${SLM_SOURCE:-stsc}"
+
+case "${SLM_SOURCE}" in
+    stsc) SLM_DOWNLOADER="slmDownloader"
+          SLM_SOURCE_TAG="" ;;
+    glm)  SLM_DOWNLOADER="slmGlmDownloader"
+          SLM_SOURCE_TAG="_glm" ;;
+    *)    echo "slm_cfg.sh: SLM_SOURCE inválida: '${SLM_SOURCE}' (use stsc ou glm)" >&2
+          exit 1 ;;
+esac
+
 # diretórios de dados e de logs
-SLM_DATA="${SLM_PATH}/data"
-SLM_LOGS="${SLM_PATH}/logs"
+SLM_DATA="${SLM_PATH}/data${SLM_SOURCE_TAG}"
+SLM_LOGS="${SLM_PATH}/logs${SLM_SOURCE_TAG}"
 
 # raw: CSV baixado; state: locks e estado entre execuções;
 # temp: JSON/PNG por frame; output: produtos finais;

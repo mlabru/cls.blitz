@@ -11,6 +11,8 @@
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
 #
+# 2026.nov  mlabru  run_slm_downloader chama SLM_DOWNLOADER (fonte SLM_SOURCE);
+#                   tracker e render recebem --source
 # 2026.nov  mlabru  [fix] generate_map só marca o CSV como processado depois
 #                   do mapa (ou de "sem raios", rc 3): falha é retentada
 # 2026.nov  mlabru  run_slm_downloader passa -a (SLM_ARCHIVE); run_slm_tracker
@@ -162,19 +164,20 @@ update_metrics()
 # < programas Python >-----------------------------------------------------------------
 
 # -------------------------------------------------------------------------------------
-# baixa o snapshot da REDEMET e atualiza o CSV acumulado (slmDownloader.py)
-# e o arquivo diário dos raios (SLM_ARCHIVE); stdout e stderr vão para
-# logs/slmDownloader.log
+# baixa os eventos novos da fonte (SLM_DOWNLOADER: slmDownloader.py, STSC da
+# REDEMET, ou slmGlmDownloader.py, GOES-19 GLM) e atualiza o CSV acumulado e
+# o arquivo diário (SLM_ARCHIVE); stdout e stderr vão para
+# logs/<SLM_DOWNLOADER>.log.  Os dois aceitam os mesmos argumentos
 #
 # uso: run_slm_downloader
-# retorno: o código de saída do slmDownloader.py
+# retorno: o código de saída do downloader
 #
 run_slm_downloader()
 {
     local li_rc=0
 
-    python3 "${SLM_LIB_DIR}/apps/slmDownloader.py" -f "${SLM_RAW_FILE}" -s "${SLM_RAW}" \
-            -a "${SLM_ARCHIVE}" >> "${SLM_LOGS}/slmDownloader.log" 2>&1 || li_rc=$?
+    python3 "${SLM_LIB_DIR}/apps/${SLM_DOWNLOADER}.py" -f "${SLM_RAW_FILE}" -s "${SLM_RAW}" \
+            -a "${SLM_ARCHIVE}" >> "${SLM_LOGS}/${SLM_DOWNLOADER}.log" 2>&1 || li_rc=$?
 
     return "${li_rc}"
 
@@ -218,6 +221,7 @@ run_slm_tracker()
     local li_rc=0
 
     python3 "${SLM_LIB_DIR}/apps/slmTracker.py" --since-ts "${ls_since_ts}" \
+            --source "${SLM_SOURCE}" \
             --tracks-file "${SLM_TRACKS_STATE_FILE}" \
             --verify-file "${SLM_VERIFY_FILE}" \
             --assoc-file "${SLM_ASSOC_FILE}" --frames-file "${SLM_FRAMES_FILE}" \
@@ -240,7 +244,7 @@ run_slm_render()
     local ls_png="$2"
     local li_rc=0
 
-    python3 "${SLM_LIB_DIR}/apps/slmRender.py" "${ls_json}" "${ls_png}" \
+    python3 "${SLM_LIB_DIR}/apps/slmRender.py" --source "${SLM_SOURCE}" "${ls_json}" "${ls_png}" \
             >> "${SLM_LOGS}/slmRender.log" 2>&1 || li_rc=$?
 
     return "${li_rc}"

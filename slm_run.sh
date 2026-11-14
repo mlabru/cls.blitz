@@ -8,8 +8,9 @@
 # script cron-driven do SLM: uma passada completa do pipeline por chamada.
 #
 # workflow:
-# - apps/slmDownloader.py: baixa o snapshot da REDEMET e atualiza o CSV
-#   acumulado (1h de retenção); uma falha aqui não impede o resto (segue
+# - downloader (SLM_DOWNLOADER, conforme SLM_SOURCE): apps/slmDownloader.py
+#   (STSC da REDEMET) ou apps/slmGlmDownloader.py (GOES-19 GLM); atualiza o
+#   CSV acumulado (1h de retenção); uma falha aqui não impede o resto (segue
 #   com o CSV que já existe);
 # - apps/slmMapper.py: mapa simples dos raios (slm_now.png/slm_prv.png), só
 #   se o CSV mudou;
@@ -20,7 +21,12 @@
 # crontab: a REDEMET atualiza o snapshot a cada ~5 min, então o cron roda a
 # cada 5 min (com */10, metade dos snapshots se perdia):
 #   */5 * * * * /caminho/para/slm_run.sh >> /caminho/para/logs/slm_run_cron.log 2>&1
+# com o GLM (arquivos a cada 20 s, data_glm/ e logs_glm/ próprios; pode rodar
+# junto com o STSC):
+#   */5 * * * * SLM_SOURCE=glm /caminho/para/slm_run.sh >> /caminho/para/logs_glm/slm_run_cron.log 2>&1
 #
+# 2026.nov  mlabru  fonte escolhida por SLM_SOURCE (slm_cfg.sh): downloader e
+#                   log dele vêm de SLM_DOWNLOADER
 # 2026.nov  mlabru  CSVs de diagnóstico (SLM_ASSOC_FILE, SLM_FRAMES_FILE) rotacionados
 # 2026.nov  mlabru  CSV de verificação (SLM_VERIFY_FILE) rotacionado como os logs
 # 2026.out  mlabru  [fix] crontab de exemplo a cada 5 min (era */10)
@@ -39,7 +45,7 @@
 # 2026.aug  mlabru  versão inicial (cron, sem daemon)
 #
 # depends on: slm_cfg.sh, slm_common.sh, cls_common.sh, python3, flock,
-#             ffmpeg, apps/slmDownloader.py, apps/slmMapper.py,
+#             ffmpeg, apps/slmDownloader.py ou apps/slmGlmDownloader.py, apps/slmMapper.py,
 #             apps/slmTracker.py, apps/slmRender.py
 
 set -euo pipefail
@@ -77,15 +83,15 @@ acquire_instance_lock()
 } # acquire_instance_lock
 
 # -------------------------------------------------------------------------------------
-# baixa as ocorrências novas (slmDownloader.py).  Uma falha só é logada: o
+# baixa as ocorrências novas (SLM_DOWNLOADER).  Uma falha só é logada: o
 # pipeline segue com o CSV que já existe
 #
 run_download()
 {
-    log "[info]: slm_run: baixando ocorrências..."
+    log "[info]: slm_run: baixando ocorrências (fonte ${SLM_SOURCE})..."
 
     if ! run_slm_downloader; then
-        log "[error]: slm_run: download falhou — usando o CSV existente; veja ${SLM_LOGS}/slmDownloader.log"
+        log "[error]: slm_run: download falhou — usando o CSV existente; veja ${SLM_LOGS}/${SLM_DOWNLOADER}.log"
     fi
 
 } # run_download
@@ -145,7 +151,7 @@ main()
 
     # os CSVs de verificação e de diagnóstico também só crescem: mesma
     # rotação dos logs (o histórico longo para calibrar está no SLM_ARCHIVE)
-    check_log_size "${SLM_LOGS}/slmDownloader.log" "${SLM_LOGS}/slmMapper.log" \
+    check_log_size "${SLM_LOGS}/${SLM_DOWNLOADER}.log" "${SLM_LOGS}/slmMapper.log" \
                    "${SLM_LOGS}/slmTracker.log" "${SLM_LOGS}/slmRender.log" \
                    "${SLM_VERIFY_FILE}" "${SLM_ASSOC_FILE}" "${SLM_FRAMES_FILE}"
 

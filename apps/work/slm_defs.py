@@ -40,7 +40,9 @@ CS_REDEMET_KEY = os.getenv("CS_REDEMET_KEY")
 
 # URL do produto STSC; {0} recebe a API key
 #
-# [doc] anima=60 pede à API os últimos 60 minutos de descargas.  Esse valor
+# [doc] anima=60 pede à API as imagens dos últimos 60 minutos (uma a cada
+# 6-9 min; cada posição é uma célula de grade CB de ~10 km, não uma descarga
+# -- ver o cabeçalho do slmDownloader).  Esse valor
 # precisa ficar em sincronia com CI_MAX_HOURS (apps/slmDownloader.py), que
 # define a janela de retenção local do CSV acumulado (CI_MAX_HOURS=1 == 60
 # min).  Se um dos dois mudar sem o outro: anima menor que CI_MAX_HOURS*60

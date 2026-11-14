@@ -5,17 +5,27 @@ Copyright (c) 1995-2026, Instituto de Controle do Espaço Aéreo
 
 Simple Lightning Model
 slmTracker
-gera UM frame de nowcasting a partir do CSV acumulado de raios: agrupa os
-raios novos em células, associa as células aos tracks do frame anterior,
+gera UM frame de nowcasting a partir do CSV acumulado de eventos: agrupa
+os eventos em células, associa as células aos tracks do frame anterior,
 prevê o movimento e grava o JSON do frame para o slmRender.
+
+[doc] o que é um "evento": com a fonte atual (REDEMET STSC), cada linha do
+CSV é uma célula de grade de 0,1° (~10 km) com atividade convectiva (CB) numa
+imagem da animação STSC, e NÃO uma descarga individual.  As imagens chegam a
+cada 6-9 min, então o CSV tem poucos ts distintos.  Os nomes do código
+(TLightning, "raio", flash_rate) vêm da fonte de descargas que o modelo
+pressupõe e continuam valendo para uma rede de descargas (ex.: BrasilDAT);
+com o STSC, size é área ativa x imagens e flash_rate é "células por minuto".
 
 o CSV de entrada é acumulativo (o downloader mantém a última hora):
     12:00 -> 12:05
     12:00 -> 12:10
     12:00 -> 12:15
 --since-ts só decide se há frame novo (algum evento com ts > since_ts); o
-agrupamento usa sempre os últimos CI_WINDOW_MINUTES do CSV inteiro, contados
-do raio mais recente.
+agrupamento usa sempre a janela mais recente do CSV inteiro: as últimas
+CI_WINDOW_IMAGES imagens (fonte em imagens, o STSC) ou, com
+CI_WINDOW_IMAGES = 0, os últimos CI_WINDOW_MINUTES (fonte contínua de
+descargas).  Ver _select_time_window.
 
 fluxo (process):
   1) lê o CSV e verifica se há eventos novos (load_csv, filter_new_events);
@@ -37,6 +47,11 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
             --verify-file data/state/slm_verification.csv \
             --assoc-file data/state/slm_assoc.csv --frames-file data/state/slm_frames.csv
 
+2026.nov  mlabru  --source (stsc/glm): a fonte decide a janela (imagens no
+                  STSC, minutos no GLM, window_images_for)
+2026.nov  mlabru  [fix] janela por número de imagens (CI_WINDOW_IMAGES): com
+                  imagens a cada 6 ou 9 min, a janela de 20 min tinha ora 3,
+                  ora 4 imagens, e size/flash_rate/t_ref oscilavam ~33%
 2026.nov  mlabru  instrumentação para calibrar: diagnóstico da associação
                   (--assoc-file), resumo por frame com latência
                   (--frames-file), previsões perdidas na verificação;
@@ -82,14 +97,39 @@ import work.slm_verify as vrf
 
 # < constants >────────────────────────────────────────────────────────────────────────
 
-# DBSCAN: distância máxima (km) entre raios vizinhos
+# DBSCAN: distância máxima (km) entre eventos vizinhos.
+# [doc] com o STSC (grade de 0,1°: 11,1 km em latitude, 11,1·cos(lat) km em
+# longitude) o eps é discreto: 12 km pega só os 4 vizinhos diretos (a diagonal
+# tem 14,7-15,7 km) e o mesmo ponto nas outras imagens da janela.  Valores
+# que mudam algo: < 11,1 (a grade se desfaz em latitude), ~16 (8 vizinhos),
+# ~22,3 (2 passos).  Entre esses, o resultado é o mesmo
 CF_EPS_KM = 12.0
 
-# DBSCAN: mínimo de raios para formar uma célula
+# DBSCAN: mínimo de eventos (vizinhança incluindo o próprio) para ser ponto
+# central.  [doc] com o STSC e eps de 12 km, a vizinhança tem no máximo 5
+# células de grade x CI_WINDOW_IMAGES imagens (20); com 10, uma célula precisa
+# de pelo menos 2 imagens para nascer (uma imagem dá no máximo 5)
 CI_MIN_PTS = 10
 
-# janela de tempo (minutos) dos raios agrupados, contada do raio mais recente
+# janela de agrupamento, em IMAGENS: os eventos dos últimos CI_WINDOW_IMAGES
+# ts distintos.  [fix] o STSC chega em imagens a cada 6-9 min; uma janela em
+# minutos pegava ora 3, ora 4 imagens (aliasing), e o tamanho da célula, que
+# pesa na associação, oscilava ~33%.  4 = o que a janela de 20 min continha
+# com imagens a cada 6 min.  0 = janela em minutos (CI_WINDOW_MINUTES), para
+# uma fonte contínua de descargas (ex.: BrasilDAT)
+CI_WINDOW_IMAGES = 4
+# janela em minutos, contada do evento mais recente (só com CI_WINDOW_IMAGES = 0)
 CI_WINDOW_MINUTES = 20
+# no modo em imagens, a janela nunca vai além disto (minutos): uma falha de
+# imagens da REDEMET não traz para a janela imagens velhas demais.  4 imagens
+# a 6-9 min ocupam 18-27 min
+CF_WINDOW_MAX_SPAN_MIN = 30.0
+
+# fontes de eventos (--source): "stsc" = imagens da REDEMET (janela em
+# imagens); "glm" = flashes do GOES-19 (fonte contínua, janela em minutos)
+CS_SOURCE_STSC = "stsc"
+CS_SOURCE_GLM = "glm"
+CLST_SOURCES = [CS_SOURCE_STSC, CS_SOURCE_GLM]
 
 # duração mínima (minutos) de uma célula no cálculo da taxa de raios
 CF_MIN_CELL_DURATION_MIN = 1.0
@@ -200,12 +240,13 @@ def filter_new_events(flst_events: list, ff_since_ts: float) -> list:
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def cluster_window(flst_events: list,
-                   ff_window_minutes: float | None = None) -> list:
+                   ff_window_minutes: float | None = None,
+                   fi_window_images: int | None = None) -> list:
     """
-    agrupa em células os raios mais recentes.
+    agrupa em células os eventos mais recentes.
 
     passo a passo:
-      1. separa os raios dos últimos ff_window_minutes (_select_time_window);
+      1. separa os eventos da janela mais recente (_select_time_window);
       2. agrupa com DBSCAN (eps = CF_EPS_KM, min_pts = CI_MIN_PTS);
       3. resume cada cluster numa TCell (_build_cell).
 
@@ -214,16 +255,15 @@ def cluster_window(flst_events: list,
           célula corretos.
 
     :param flst_events: lista de TLightning (o CSV inteiro; a janela é recortada aqui)
-    :param ff_window_minutes: tamanho da janela, em minutos (None = CI_WINDOW_MINUTES)
+    :param ff_window_minutes: janela em minutos, no modo contínuo (None = CI_WINDOW_MINUTES)
+    :param fi_window_images: janela em imagens; 0 = modo contínuo, em minutos
+                             (None = CI_WINDOW_IMAGES)
     :returns: lista de TCell (ainda sem ID de track)
     """
     if not flst_events:
         return []
 
-    if ff_window_minutes is None:
-        ff_window_minutes = CI_WINDOW_MINUTES
-
-    llst_window_events = _select_time_window(flst_events, ff_window_minutes)
+    llst_window_events = _select_time_window(flst_events, ff_window_minutes, fi_window_images)
 
     llst_clusters = spc.dbscan_spatial(llst_window_events,
                                        ff_eps_km=CF_EPS_KM,
@@ -232,9 +272,10 @@ def cluster_window(flst_events: list,
     return [_build_cell(llst_cluster) for llst_cluster in llst_clusters]
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _select_time_window(flst_events: list, ff_window_minutes: float) -> list:
+def _select_time_window(flst_events: list, ff_window_minutes: float | None = None,
+                        fi_window_images: int | None = None) -> list:
     """
-    os eventos dos últimos ff_window_minutes, contados a partir do mais recente.
+    os eventos da janela mais recente, que termina no evento mais novo.
 
     [doc] por design, eventos mais antigos que a janela são EXCLUÍDOS, mesmo
     que nunca tenham entrado num frame: se o tracker ficar parado por mais
@@ -244,11 +285,22 @@ def _select_time_window(flst_events: list, ff_window_minutes: float) -> list:
     (trk.expire_stale_tracks), então não herdam células da volta.
 
     :param flst_events: lista (não vazia) de TLightning
-    :param ff_window_minutes: tamanho da janela, em minutos
+    :param ff_window_minutes: janela em minutos, no modo contínuo (None = CI_WINDOW_MINUTES)
+    :param fi_window_images: janela em imagens; 0 = modo contínuo
+                             (None = CI_WINDOW_IMAGES)
     :returns: eventos dentro da janela; todos, se a janela ficar vazia
     """
-    lf_latest_ts = max(l_event.ts for l_event in flst_events)
-    lf_window_start_ts = lf_latest_ts - ff_window_minutes * 60.0
+    if fi_window_images is None:
+        fi_window_images = CI_WINDOW_IMAGES
+
+    if fi_window_images > 0:
+        lf_window_start_ts = _image_window_start_ts(flst_events, fi_window_images)
+
+    else:
+        if ff_window_minutes is None:
+            ff_window_minutes = CI_WINDOW_MINUTES
+
+        lf_window_start_ts = max(l_event.ts for l_event in flst_events) - ff_window_minutes * 60.0
 
     llst_window_events = [l_event for l_event in flst_events
                           if l_event.ts >= lf_window_start_ts]
@@ -260,6 +312,24 @@ def _select_time_window(flst_events: list, ff_window_minutes: float) -> list:
         return flst_events
 
     return llst_window_events
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _image_window_start_ts(flst_events: list, fi_window_images: int) -> float:
+    """
+    início da janela em imagens: o ts da fi_window_images-ésima imagem mais
+    recente (cada ts distinto é uma imagem), limitado a CF_WINDOW_MAX_SPAN_MIN
+    antes da mais nova.
+
+    :param flst_events: lista (não vazia) de TLightning
+    :param fi_window_images: quantas imagens entram na janela (> 0)
+    :returns: ts do início da janela (inclusive)
+    """
+    llst_image_ts = sorted({l_event.ts for l_event in flst_events})
+
+    lf_nth_image_ts = llst_image_ts[-min(fi_window_images, len(llst_image_ts))]
+    lf_oldest_allowed_ts = llst_image_ts[-1] - CF_WINDOW_MAX_SPAN_MIN * 60.0
+
+    return max(lf_nth_image_ts, lf_oldest_allowed_ts)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _build_cell(flst_cluster: list) -> sst.TCell:
@@ -389,7 +459,8 @@ def process(fs_input_csv: str, fs_output_json: str,
             fs_verify_file: str | None = None,
             fs_assoc_file: str | None = None,
             fs_frames_file: str | None = None,
-            ff_run_ts: float | None = None) -> float | None:
+            ff_run_ts: float | None = None,
+            fs_source: str | None = None) -> float | None:
     """
     gera um frame completo (ver o fluxo no cabeçalho do módulo).
 
@@ -402,6 +473,8 @@ def process(fs_input_csv: str, fs_output_json: str,
     :param fs_frames_file: CSV de resumo por frame; None = não grava
     :param ff_run_ts: instante da rodada, para a latência (None = agora;
                       o slmReplay passa o instante simulado)
+    :param fs_source: fonte dos eventos, decide a janela (window_images_for;
+                      None = CS_SOURCE_STSC)
     :returns: ts do evento novo mais recente; None se não houve frame
               (sem eventos, sem eventos novos ou sem células); o ts do
               último frame aplicado, se o shell estiver atrasado (_catch_up_ts)
@@ -416,14 +489,16 @@ def process(fs_input_csv: str, fs_output_json: str,
     if not _has_new_events(llst_all_events, max(ff_since_ts, lf_applied_ts)):
         return _catch_up_ts(ff_since_ts, lf_applied_ts)
 
-    # [fix] o clustering usa a janela fixa dos últimos CI_WINDOW_MINUTES do CSV
+    # [fix] o clustering usa a janela fixa (CI_WINDOW_IMAGES imagens) do CSV
     # INTEIRO, não só os eventos novos: (a) a janela tem sempre o mesmo
     # tamanho (antes eram ~5 min numa rodada normal e crescia quando não
     # havia célula), então size/flash_rate/density são comparáveis entre
-    # frames; (b) raios que chegam atrasados com ts == since_ts (a API tem
-    # resolução de minuto e o último minuto chega incompleto) entram no
-    # frame seguinte em vez de se perderem.  since_ts só decide SE há frame.
-    llst_cells = cluster_window(llst_all_events)
+    # frames; (b) eventos que chegam atrasados com ts == since_ts (uma imagem
+    # que a REDEMET completa depois, ou o último minuto de uma fonte de
+    # descargas) entram no frame seguinte em vez de se perderem.  since_ts só
+    # decide SE há frame.
+    li_window_images = window_images_for(fs_source)
+    llst_cells = cluster_window(llst_all_events, fi_window_images=li_window_images)
 
     if not llst_cells:
         M_LOG.warning("sem células detectadas.")
@@ -462,7 +537,7 @@ def process(fs_input_csv: str, fs_output_json: str,
         vrf.append_rows(fs_verify_file, llst_verify_rows)
 
     _append_diagnostics(fs_assoc_file, fs_frames_file, lf_newest_ts, lf_run_ts,
-                        _count_window_events(llst_all_events), llst_cells, llst_tracks)
+                        _count_window_events(llst_all_events, li_window_images), llst_cells, llst_tracks)
 
     M_LOG.info("frame exportado para %s (%d células).", fs_output_json, len(llst_cells))
 
@@ -587,15 +662,35 @@ def _attach_forecast_and_history(flst_cells: list, flst_tracks: list,
                               for l_history_cell in l_track.history]
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _count_window_events(flst_events: list) -> int:
+def _count_window_events(flst_events: list, fi_window_images: int | None = None) -> int:
     """
-    quantos raios entraram na janela de agrupamento (diagnóstico: a fração
+    quantos eventos entraram na janela de agrupamento (diagnóstico: a fração
     que virou célula mede o quanto CF_EPS_KM/CI_MIN_PTS descartam como ruído).
 
     :param flst_events: todos os eventos, em ordem de ts (não vazia)
-    :returns: raios na janela de CI_WINDOW_MINUTES
+    :param fi_window_images: janela em imagens, a mesma de cluster_window
+                             (None = CI_WINDOW_IMAGES)
+    :returns: eventos na janela
     """
-    return len(_select_time_window(flst_events, CI_WINDOW_MINUTES))
+    return len(_select_time_window(flst_events, fi_window_images=fi_window_images))
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def window_images_for(fs_source: str | None) -> int:
+    """
+    a janela de agrupamento que a fonte pede: em imagens no STSC
+    (CI_WINDOW_IMAGES, lida na chamada), em minutos (0) no GLM, que é contínuo.
+
+    :param fs_source: CS_SOURCE_STSC, CS_SOURCE_GLM ou None (= STSC)
+    :returns: valor de fi_window_images para cluster_window
+    :raises ValueError: fonte desconhecida
+    """
+    if fs_source is None or CS_SOURCE_STSC == fs_source:
+        return CI_WINDOW_IMAGES
+
+    if CS_SOURCE_GLM == fs_source:
+        return 0
+
+    raise ValueError("fonte desconhecida: %r (use uma de %s)" % (fs_source, CLST_SOURCES))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _append_diagnostics(fs_assoc_file: str | None, fs_frames_file: str | None,
@@ -640,7 +735,7 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
                    description="Simple Lightning Model — nowcasting incremental")
 
     l_parser.add_argument("input_csv",
-                          help="CSV acumulativo de descargas atmosféricas")
+                          help="CSV acumulativo de eventos (STSC: células de grade CB por imagem)")
     l_parser.add_argument("output_json",
                           help="JSON de saída do frame atual")
     l_parser.add_argument("--since-ts",
@@ -657,6 +752,9 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
     l_parser.add_argument("--frames-file",
                           help="CSV de resumo por frame (latência, ciclo de vida dos tracks)",
                           default=CS_DEFAULT_FRAMES_FILE)
+    l_parser.add_argument("--source",
+                          help="fonte dos eventos: stsc (imagens, padrão) ou glm (contínua)",
+                          choices=CLST_SOURCES, default=CS_SOURCE_STSC)
 
     l_args = l_parser.parse_args(flst_argv)
 
@@ -680,7 +778,8 @@ def main(flst_argv: list | None = None) -> int:
 
     lf_newest_ts = process(l_args.input_csv, l_args.output_json,
                            l_args.since_ts, l_args.tracks_file, l_args.verify_file,
-                           l_args.assoc_file, l_args.frames_file)
+                           l_args.assoc_file, l_args.frames_file,
+                           fs_source=l_args.source)
 
     if lf_newest_ts is not None:
         # [doc] "NEWEST_TS=<ts>" é um contrato entre processos, não só uma

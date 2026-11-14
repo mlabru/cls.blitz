@@ -47,6 +47,7 @@ replay sempre começa do zero, então não é afetado.
 códigos de retorno: 0 ok, 1 nenhum raio nos arquivos, 2 argumentos inválidos
 (inclusive --set).
 
+2026.nov  mlabru  --source (stsc/glm), repassado ao tracker (janela da fonte)
 2026.nov  mlabru  initial version
 """
 # < imports >──────────────────────────────────────────────────────────────────────────
@@ -230,13 +231,15 @@ def schedule(flst_rows: list, ff_step_s: float) -> tuple:
     return llst_available, [lf_first + li_run * ff_step_s for li_run in range(1, li_runs + 1)]
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def replay(flst_rows: list, fs_out_dir: str, ff_step_s: float = CF_DEFAULT_STEP_MIN * 60.0) -> tuple:
+def replay(flst_rows: list, fs_out_dir: str, ff_step_s: float = CF_DEFAULT_STEP_MIN * 60.0,
+           fs_source: str | None = None) -> tuple:
     """
     roda o tracker rodada a rodada (ver o fluxo no cabeçalho).
 
     :param flst_rows: tuplas (fetched_ts ou None, ts, lat, lng)
     :param fs_out_dir: diretório de saída (criado; saídas anteriores apagadas)
     :param ff_step_s: intervalo entre rodadas sem fetched_ts (s)
+    :param fs_source: fonte dos raios, decide a janela do tracker (None = stsc)
     :returns: (rodadas com raio novo, frames gerados)
     """
     ldct_paths = _prepare_out_dir(fs_out_dir)
@@ -268,7 +271,7 @@ def replay(flst_rows: list, fs_out_dir: str, ff_step_s: float = CF_DEFAULT_STEP_
         lf_newest_ts = tracker.process(ldct_paths["raw"], ldct_paths["frame"], lf_since_ts,
                                        ldct_paths["tracks"], ldct_paths["verify"],
                                        ldct_paths["assoc"], ldct_paths["frames"],
-                                       ff_run_ts=lf_run_ts)
+                                       ff_run_ts=lf_run_ts, fs_source=fs_source)
 
         if lf_newest_ts is not None:
             lf_since_ts = lf_newest_ts
@@ -324,7 +327,8 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
     lê a linha de comando.
 
     :param flst_argv: argumentos (None = sys.argv[1:])
-    :returns: namespace com inputs, out_dir, overrides, step_min, report_only, verbose
+    :returns: namespace com inputs, out_dir, overrides, step_min, source,
+              report_only, verbose
     """
     l_parser = argparse.ArgumentParser(
                    description="Simple Lightning Model — reprocessamento para calibração")
@@ -338,6 +342,9 @@ def _parse_args(flst_argv: list | None) -> argparse.Namespace:
                           help="troca uma constante (pode repetir)")
     l_parser.add_argument("--step-min", type=float, default=CF_DEFAULT_STEP_MIN,
                           help="minutos entre rodadas quando os raios não têm fetched_ts")
+    l_parser.add_argument("--source", choices=tracker.CLST_SOURCES,
+                          default=tracker.CS_SOURCE_STSC,
+                          help="fonte dos raios do archive: stsc (padrão) ou glm")
     l_parser.add_argument("--report-only", action="store_true",
                           help="só resume os CSVs já existentes em --out-dir")
     l_parser.add_argument("-v", "--verbose", action="store_true",
@@ -405,7 +412,8 @@ def _run_quietly(f_args: argparse.Namespace, flst_rows: list) -> str:
         logging.disable(logging.WARNING)
 
     try:
-        li_runs, li_frames = replay(flst_rows, f_args.out_dir, f_args.step_min * 60.0)
+        li_runs, li_frames = replay(flst_rows, f_args.out_dir, f_args.step_min * 60.0,
+                                    f_args.source)
 
     finally:
         logging.disable(logging.NOTSET)

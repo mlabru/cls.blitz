@@ -26,6 +26,9 @@ atenção: a ORDEM em que os elementos são desenhados importa para o resultado
 (com zorders iguais, quem é desenhado depois fica por cima).  Ao reorganizar,
 compare os PNGs antes/depois pixel a pixel.
 
+2026.nov  mlabru  --source (stsc/glm): fonte e janela no HUD
+2026.nov  mlabru  HUD: "Events" e janela em imagens (com o STSC cada evento é
+                  uma célula de grade CB numa imagem, não uma descarga)
 2026.nov  mlabru  seta só a partir de CF_MIN_ARROW_SPEED_KMH (a velocidade
                   agora vem do Kalman e quase nunca é exatamente 0)
 2026.out  mlabru  refatoração para legibilidade: render dividido em
@@ -101,10 +104,12 @@ CLST_SEVERITY_CLASSES = [
     (math.inf, "#d7191c", "Extreme"),    # vermelho
 ]
 
-# janela mostrada no HUD (minutos).  Só texto: deve acompanhar
-# slmTracker.CI_WINDOW_MINUTES (não importado aqui para o render não depender
-# do tracker)
-CI_HUD_WINDOW_MINUTES = 20
+# fonte (--source) -> (rótulo, janela) mostrados no HUD.  Só texto: a janela
+# deve acompanhar slmTracker.CI_WINDOW_IMAGES (stsc) e CI_WINDOW_MINUTES (glm);
+# não é importada aqui para o render não depender do tracker
+CDCT_HUD_SOURCE = {"stsc": ("STSC", "4 images"),
+                   "glm":  ("GLM",  "20 min")}
+CS_DEFAULT_SOURCE = "stsc"
 
 # raio da célula quando a densidade é zero (km) e tamanho mínimo da elipse (graus)
 CF_DEFAULT_CELL_RADIUS_KM = 5.0
@@ -234,12 +239,13 @@ def _cone_width_km(fdct_last_point: dict, ff_length_km: float,
     return (lf_lat_std_km + lf_lng_std_km) / 2.0 * 2.0
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def render(fs_input_json: str, fs_output_png: str) -> int:
+def render(fs_input_json: str, fs_output_png: str, fs_source: str | None = None) -> int:
     """
     desenha um frame (JSON de células) num PNG.
 
     :param fs_input_json: JSON gerado pelo slmTracker
     :param fs_output_png: PNG de saída (o diretório já precisa existir)
+    :param fs_source: fonte dos eventos, para o HUD (None = CS_DEFAULT_SOURCE)
     :returns: CI_RC_OK
     """
     llst_cells = _load_cells(fs_input_json)
@@ -252,7 +258,7 @@ def render(fs_input_json: str, fs_output_png: str) -> int:
     for ldct_cell in llst_cells:
         _draw_cell(l_axes, l_projection, ldct_cell)
 
-    _draw_hud(l_axes, llst_cells)
+    _draw_hud(l_axes, llst_cells, fs_source or CS_DEFAULT_SOURCE)
     _draw_legend(l_axes)
 
     l_axes.set_title(CS_MAP_TITLE, fontsize=18, color=mdf.CS_TEXT_COLOR, pad=15)
@@ -500,20 +506,26 @@ def _draw_forecast_cone(f_axes: Axes, f_projection: ccrs.Projection,
                              zorder=5))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _draw_hud(f_axes: Axes, flst_cells: list) -> None:
+def _draw_hud(f_axes: Axes, flst_cells: list, fs_source: str = CS_DEFAULT_SOURCE) -> None:
     """
-    caixa de HUD: horário do frame, número de células e de raios, janela.
+    caixa de HUD: horário do frame, número de células e de eventos, janela.
+
+    [doc] "Events" e não "Flashes": com o STSC, cada evento é uma célula de
+    grade (~10 km) com atividade CB numa imagem, não uma descarga.
 
     :param f_axes: eixo cartopy
     :param flst_cells: células desenhadas
+    :param fs_source: fonte dos eventos (chave de CDCT_HUD_SOURCE)
     """
-    li_total_flashes = sum(ldct_cell["size"] for ldct_cell in flst_cells)
+    ls_source_label, ls_window_text = CDCT_HUD_SOURCE[fs_source]
+    li_total_events = sum(ldct_cell["size"] for ldct_cell in flst_cells)
 
     ls_hud = (f"LIGHTNING NOWCAST\n"
               f"{_frame_time_text(flst_cells)}\n\n"
               f"Cells  : {len(flst_cells)}\n"
-              f"Flashes: {li_total_flashes}\n"
-              f"Window : {CI_HUD_WINDOW_MINUTES} min")
+              f"Events : {li_total_events}\n"
+              f"Source : {ls_source_label}\n"
+              f"Window : {ls_window_text}")
 
     mpb.draw_hud(f_axes, ls_hud, fi_fontsize=13)
 
@@ -606,6 +618,8 @@ def main(flst_argv: list | None = None) -> int:
     )
     l_parser.add_argument("input_json", help="JSON de células gerado pelo pipeline")
     l_parser.add_argument("output_png", help="PNG de saída")
+    l_parser.add_argument("--source", help="fonte dos eventos (HUD): stsc ou glm",
+                          choices=sorted(CDCT_HUD_SOURCE), default=CS_DEFAULT_SOURCE)
 
     l_args = l_parser.parse_args(flst_argv)
 
@@ -616,7 +630,7 @@ def main(flst_argv: list | None = None) -> int:
     # [fix#2] cria o diretório de saída se não existir
     os.makedirs(os.path.dirname(os.path.abspath(l_args.output_png)), exist_ok=True)
 
-    return render(l_args.input_json, l_args.output_png)
+    return render(l_args.input_json, l_args.output_png, l_args.source)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 # this is the bootstrap process

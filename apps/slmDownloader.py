@@ -5,8 +5,16 @@ Copyright (c) 1995-2026, Instituto de Controle do Espaço Aéreo
 
 Simple Lightning Model
 slmDownloader
-baixa o snapshot mais recente de raios da API STSC da REDEMET e o acrescenta
-ao CSV acumulado (data/raw/slm_lightning.csv), que guarda só a última hora.
+baixa o snapshot mais recente da API STSC da REDEMET e o acrescenta ao CSV
+acumulado (data/raw/slm_lightning.csv), que guarda só a última hora.
+
+[doc] o que o STSC entrega: a animação da última hora, uma imagem a cada
+6-9 min ("anima" = horários HH:MM; "stsc" = uma lista de posições por
+imagem).  Cada posição {"la", "lo"} é o centro de uma célula de grade de 0,1°
+(~10 km) com atividade convectiva (CB) naquela imagem, NÃO uma descarga
+individual.  O CSV, portanto, tem um evento por (imagem, célula de grade),
+com o horário da imagem.  O nome "lightning" ficou da fonte de descargas que
+o modelo pressupõe (ex.: BrasilDAT, se vier a ser usada).
 
 fluxo (download_raios):
   1) pede o snapshot à REDEMET (get_redemet_raios): requisição HTTP,
@@ -34,8 +42,8 @@ gravação).  Em falha o CSV anterior fica intacto.
 
 2026.nov  mlabru  arquivo diário dos raios novos (--archive-dir, slm_archive),
                   base do reprocessamento para calibração (slmReplay)
-2026.nov  mlabru  [fix] deduplicação por contagem (multiconjunto): dois raios
-                  reais no mesmo minuto e ponto não viram um só
+2026.nov  mlabru  [fix] deduplicação por contagem (multiconjunto): duas linhas
+                  iguais vindas da fonte não viram uma só
 2026.out  mlabru  [fix] resposta sem "anima"/"stsc" e posição sem "la"/"lo"
                   são logadas e tratadas, não mais KeyError não capturado
 2026.out  mlabru  refatoração para legibilidade: download_raios e
@@ -391,7 +399,8 @@ def _snapshot_to_rows(flst_hours: list, flst_positions_per_hour: list,
     converte o snapshot da API em linhas do CSV.
 
     a API manda duas listas paralelas: flst_hours[i] ("HH:MM", GMT) e
-    flst_positions_per_hour[i] (lista de {"la": lat, "lo": lng} daquele minuto).
+    flst_positions_per_hour[i] (lista de {"la": lat, "lo": lng}: as células de
+    grade com atividade CB naquela imagem).
     Horas inválidas ou anteriores ao corte e posições sem "la"/"lo" são puladas.
 
     :param flst_hours: horas "HH:MM"
@@ -464,9 +473,10 @@ def _drop_duplicates(flst_new_rows: list[dict], flst_kept_rows: list[dict]) -> l
     inteira a cada chamada, então chamadas seguidas se repetem).
 
     [fix] a comparação é por CONTAGEM (multiconjunto), não por presença: a
-    chave é (minuto, lat, lng), e dois raios reais podem tê-la igual.  Se o
-    CSV tem a chave 1 vez e o snapshot 2 vezes (o segundo raio chegou
-    atrasado), entra 1; antes, os dois eram descartados por "já existir".
+    chave é (horário, lat, lng).  Com o STSC ela é única (uma célula de grade
+    por imagem), mas uma fonte de descargas pode repeti-la (dois raios no
+    mesmo minuto e ponto).  Se o CSV tem a chave 1 vez e o snapshot 2 vezes,
+    entra 1; antes, os dois eram descartados por "já existir".
 
     :param flst_new_rows: linhas vindas da API
     :param flst_kept_rows: linhas já gravadas (dentro da janela)

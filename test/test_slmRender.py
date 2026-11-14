@@ -82,3 +82,12 @@ def test_motion_arrow_only_above_min_speed(speed, drawn):
                                         "direction_deg": 90.0})
 
     assert bool(axes.quivers) == drawn
+
+
+def test_hud_shows_source_and_its_window(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(srr.mpb, "draw_hud", lambda ax, text, fi_fontsize: captured.update(text=text))
+
+    srr._draw_hud(None, [], "glm")
+
+    assert "Source : GLM" in captured["text"] and "Window : 20 min" in captured["text"]
