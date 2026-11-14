@@ -3,7 +3,6 @@
 .doc/
 .gpt/
 logs/
-logs_glm/
 .new/
 .old/
 __pycache__/
@@ -25,7 +24,7 @@ tst_env/
 *.db-shm
 *.db-wal
 
-# dados de execução do slm_run.sh (SLM_PATH = ~/Public/bltz, que aponta para
+# dados de execução do blt_run.sh (SLM_PATH = ~/Public/bltz, que aponta para
 # este diretório): CSV, estado, frames, produtos e archive das duas fontes
+# (arquivos slm_* = STSC, glm_* = GLM)
 data/
-data_glm/

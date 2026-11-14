@@ -25,30 +25,30 @@ fluxo (download_raios):
      horas fora da janela -- _snapshot_to_rows;
   4) tira as linhas novas que já estavam no CSV (a API devolve a última
      hora inteira a cada chamada) -- _drop_duplicates;
-  5) grava o CSV completo de forma atômica (slm_ioutil.atomic_write_csv),
+  5) grava o CSV completo de forma atômica (blt_ioutil.atomic_write_csv),
      porque o tracker e o mapper leem esse arquivo em outro processo;
   6) com --archive-dir, acrescenta as linhas novas ao arquivo diário dos
-     raios (slm_archive, para o slmReplay) e apaga os dias além de
+     raios (blt_archive, para o bltReplay) e apaga os dias além de
      CI_ARCHIVE_DAYS.  Falha aqui só gera aviso: o pipeline não depende dele.
 
-formato do CSV (contrato com slmTracker.load_csv e slmMapper.le_input):
+formato do CSV (contrato com bltTracker.load_csv e bltMapper.le_input):
     timestamp,lat,lng      (timestamp = epoch UTC em segundos, inteiro)
 
     python3 apps/slmDownloader.py -f slm_lightning.csv -s ./data/raw -a ./data/archive
 
-códigos de retorno (contrato com o slm_run.sh, que só testa "deu zero?"):
+códigos de retorno (contrato com o blt_run.sh, que só testa "deu zero?"):
 0 ok, 1 falha (sem API key, REDEMET indisponível/resposta inválida, erro de
 gravação).  Em falha o CSV anterior fica intacto.
 
-2026.nov  mlabru  arquivo diário dos raios novos (--archive-dir, slm_archive),
-                  base do reprocessamento para calibração (slmReplay)
+2026.nov  mlabru  arquivo diário dos raios novos (--archive-dir, blt_archive),
+                  base do reprocessamento para calibração (bltReplay)
 2026.nov  mlabru  [fix] deduplicação por contagem (multiconjunto): duas linhas
                   iguais vindas da fonte não viram uma só
 2026.out  mlabru  [fix] resposta sem "anima"/"stsc" e posição sem "la"/"lo"
                   são logadas e tratadas, não mais KeyError não capturado
 2026.out  mlabru  refatoração para legibilidade: download_raios e
                   get_redemet_raios divididos em funções de um passo só;
-                  escrita atômica via slm_ioutil.atomic_write_csv; alias de
+                  escrita atômica via blt_ioutil.atomic_write_csv; alias de
                   slm_defs "df" virou "defs"; argumentos lidos antes da checagem
                   da API key (para --help funcionar sem .env); comentários
                   errados corrigidos; logs de debug removidos
@@ -74,9 +74,9 @@ import time
 import requests
 
 # locals
-import work.slm_archive as arc
+import work.blt_archive as arc
 import work.slm_defs as defs
-import work.slm_ioutil as ioutil
+import work.blt_ioutil as ioutil
 
 # < constants >────────────────────────────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ def arg_parse(flst_argv: list | None = None) -> argparse.Namespace:
                           help="Output folder.",
                           dest="saida", type=str, default=CS_OUTPUT_DIR)
     l_parser.add_argument("-a", "--archive-dir",
-                          help="Daily archive folder of new strikes (for slmReplay).",
+                          help="Daily archive folder of new strikes (for bltReplay).",
                           dest="archive_dir", type=str, default=None)
 
     return l_parser.parse_args(flst_argv)
@@ -188,7 +188,7 @@ def download_raios(f_args: argparse.Namespace) -> bool:
 def _archive_new_rows(fs_archive_dir: str, flst_new_rows: list[dict]) -> None:
     """
     acrescenta as linhas novas desta rodada ao arquivo diário e apaga os
-    dias vencidos (slm_archive).
+    dias vencidos (blt_archive).
 
     [doc] chamado só DEPOIS do CSV gravado: se a gravação falhar, a próxima
     rodada traz os mesmos raios de novo como "novos" e eles são arquivados
