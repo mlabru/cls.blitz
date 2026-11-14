@@ -3,6 +3,7 @@
 .doc/
 .gpt/
 logs/
+logs_glm/
 .new/
 .old/
 __pycache__/
@@ -24,8 +25,7 @@ tst_env/
 *.db-shm
 *.db-wal
 
-# intermediários por execução (VOL_TEMP; ex: PNGs do volViewer em data/temp/viewer)
-data/output/
-data/raw/
-data/state/
-data/temp/
+# dados de execução do slm_run.sh (SLM_PATH = ~/Public/bltz, que aponta para
+# este diretório): CSV, estado, frames, produtos e archive das duas fontes
+data/
+data_glm/
