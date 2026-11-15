@@ -47,6 +47,8 @@ replay sempre começa do zero, então não é afetado.
 códigos de retorno: 0 ok, 1 nenhum raio nos arquivos, 2 argumentos inválidos
 (inclusive --set).
 
+2026.nov  mlabru  [fix] saídas e --report-only com o prefixo da fonte
+                  (slm_*/glm_*, _source_tag): o resumo do GLM lia os CSVs do STSC
 2026.nov  mlabru  --source (stsc/glm), repassado ao tracker (janela da fonte)
 2026.nov  mlabru  initial version
 """
@@ -98,12 +100,11 @@ CF_DEFAULT_STEP_MIN = 5.0
 CS_WORK_SUBDIR = "work"
 CS_RAW_NAME = "raw.csv"
 CS_FRAME_NAME = "frame.json"
-CS_TRACKS_NAME = "slm_tracks_state.json"
+CS_TRACKS_SUFFIX = "_tracks_state.json"
 CS_REPORT_NAME = "report.txt"
 
-# saídas de um replay anterior, apagadas antes de começar
-CT_OUTPUT_NAMES = (rpt.CS_VERIFY_NAME, rpt.CS_ASSOC_NAME, rpt.CS_FRAMES_NAME,
-                   CS_TRACKS_NAME, CS_REPORT_NAME)
+# fonte (--source) -> prefixo dos arquivos (o SLM_TAG do blt_cfg.sh)
+CDCT_SOURCE_TAG = {"stsc": "slm", "glm": "glm"}
 
 # códigos de retorno
 CI_RC_OK = 0
@@ -244,7 +245,7 @@ def replay(flst_rows: list, fs_out_dir: str, ff_step_s: float = CF_DEFAULT_STEP_
     :param fs_source: fonte dos raios, decide a janela do tracker (None = stsc)
     :returns: (rodadas com raio novo, frames gerados)
     """
-    ldct_paths = _prepare_out_dir(fs_out_dir)
+    ldct_paths = _prepare_out_dir(fs_out_dir, _source_tag(fs_source))
     llst_available, llst_runs = schedule(flst_rows, ff_step_s)
     llst_avail_ts = [lt_row[0] for lt_row in llst_available]
 
@@ -282,17 +283,30 @@ def replay(flst_rows: list, fs_out_dir: str, ff_step_s: float = CF_DEFAULT_STEP_
     return li_runs_with_data, li_frames
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def _prepare_out_dir(fs_out_dir: str) -> dict:
+def _source_tag(fs_source: str | None) -> str:
     """
-    cria o diretório de saída e apaga as saídas de um replay anterior.
+    :param fs_source: fonte (--source; None = stsc)
+    :returns: prefixo dos arquivos da fonte ("slm" ou "glm")
+    """
+    return CDCT_SOURCE_TAG[fs_source or tracker.CS_SOURCE_STSC]
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _prepare_out_dir(fs_out_dir: str, fs_tag: str = rpt.CS_DEFAULT_TAG) -> dict:
+    """
+    cria o diretório de saída e apaga as saídas de um replay anterior da
+    mesma fonte.
 
     :param fs_out_dir: diretório de saída
+    :param fs_tag: prefixo dos arquivos da fonte
     :returns: caminhos {raw, frame, tracks, verify, assoc, frames}
     """
     ls_work_dir = os.path.join(fs_out_dir, CS_WORK_SUBDIR)
     os.makedirs(ls_work_dir, exist_ok=True)
 
-    for ls_name in CT_OUTPUT_NAMES:
+    ldct_names = rpt.csv_names(fs_tag)
+    ls_tracks_name = fs_tag + CS_TRACKS_SUFFIX
+
+    for ls_name in (*ldct_names.values(), ls_tracks_name, CS_REPORT_NAME):
         ls_path = os.path.join(fs_out_dir, ls_name)
 
         if os.path.exists(ls_path):
@@ -301,10 +315,10 @@ def _prepare_out_dir(fs_out_dir: str) -> dict:
     return {
         "raw":    os.path.join(ls_work_dir, CS_RAW_NAME),
         "frame":  os.path.join(ls_work_dir, CS_FRAME_NAME),
-        "tracks": os.path.join(fs_out_dir, CS_TRACKS_NAME),
-        "verify": os.path.join(fs_out_dir, rpt.CS_VERIFY_NAME),
-        "assoc":  os.path.join(fs_out_dir, rpt.CS_ASSOC_NAME),
-        "frames": os.path.join(fs_out_dir, rpt.CS_FRAMES_NAME),
+        "tracks": os.path.join(fs_out_dir, ls_tracks_name),
+        "verify": os.path.join(fs_out_dir, ldct_names["verify"]),
+        "assoc":  os.path.join(fs_out_dir, ldct_names["assoc"]),
+        "frames": os.path.join(fs_out_dir, ldct_names["frames"]),
     }
 
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -390,7 +404,8 @@ def main(flst_argv: list | None = None) -> int:
 
         llst_header.insert(0, _run_quietly(l_args, llst_rows))
 
-    ls_report = rpt.format_report(rpt.build(l_args.out_dir), llst_header)
+    ls_report = rpt.format_report(rpt.build(l_args.out_dir, _source_tag(l_args.source)),
+                                  llst_header)
 
     if not l_args.report_only:
         with open(os.path.join(l_args.out_dir, CS_REPORT_NAME), "w", encoding="utf-8") as l_file:

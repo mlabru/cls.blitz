@@ -480,7 +480,7 @@ def test_new_cell_without_candidates_has_only_kind():
 
     trk.update_tracks([], {}, [cell], {})
 
-    assert cell.assoc == {"kind": "new"}
+    assert cell.assoc == {"kind": "new", "prior_n": 0}
 
 
 def test_split_child_diagnostics_kind():
@@ -532,3 +532,154 @@ def test_tunables_are_read_at_call_time(monkeypatch):
     monkeypatch.setattr(trk, "CF_MAX_TRACK_GAP_MIN", 1000.0)
     stale = _track("stale", 0.0)
     assert trk.expire_stale_tracks([stale], 10 * 3600.0) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# velocidade inicial pelos tracks vizinhos (2026.nov)
+
+_KM_PER_DEG = 111.19
+
+
+def _mature_track(track_id, lat, lng, v_north_kmh, v_east_kmh, cells=3):
+    """track maduro (histórico de `cells` células) com Kalman na velocidade dada."""
+    history = [sst.TCell(id=track_id, centroid=(lat, lng), size=10, t_start=0, t_end=0)
+               for _ in range(cells)]
+    track = sst.TStormTrack(id=track_id, history=history)
+    kalman = klm.TKalmanTracker.from_velocity_prior(lat, lng, (v_north_kmh, v_east_kmh), (5.0, 5.0))
+    return track, kalman
+
+
+def test_neighbor_prior_is_weighted_mean_of_mature_neighbors():
+    a, ka = _mature_track("a", 0.0, 0.3, 0.0, 40.0)          # ~33 km
+    b, kb = _mature_track("b", 0.3, 0.0, 0.0, 40.0)          # ~33 km
+    far, kf = _mature_track("far", 0.0, 3.0, 90.0, 0.0)      # ~330 km: fora
+    young, ky = _mature_track("young", 0.1, 0.1, 90.0, 0.0, cells=2)
+    kalman = {"a": ka, "b": kb, "far": kf, "young": ky}
+
+    prior = trk._neighbor_velocity_prior(_c(0.0, 0.0, 0), [a, b, far, young], kalman)
+
+    (v_north, v_east), (s_north, s_east), n = prior
+    assert n == 2
+    assert v_north == pytest.approx(0.0, abs=1e-6) and v_east == pytest.approx(40.0, rel=1e-3)
+    # vizinhos que concordam: o desvio fica no piso
+    assert (s_north, s_east) == (trk.CF_PRIOR_MIN_VEL_STD_KMH, trk.CF_PRIOR_MIN_VEL_STD_KMH)
+
+
+def test_neighbor_prior_spread_becomes_the_uncertainty():
+    a, ka = _mature_track("a", 0.0, 0.3, 0.0, 20.0)
+    b, kb = _mature_track("b", 0.0, -0.3, 0.0, 60.0)
+
+    (_, v_east), (_, s_east), _ = trk._neighbor_velocity_prior(
+        _c(0.0, 0.0, 0), [a, b], {"a": ka, "b": kb})
+
+    assert v_east == pytest.approx(40.0, rel=1e-3)
+    assert s_east == pytest.approx(20.0, rel=1e-3)
+
+
+def test_neighbor_prior_needs_minimum_neighbors():
+    a, ka = _mature_track("a", 0.0, 0.3, 0.0, 40.0)
+
+    assert trk._neighbor_velocity_prior(_c(0.0, 0.0, 0), [a], {"a": ka}) is None
+
+
+def test_new_track_starts_with_neighbor_velocity_and_skips_two_point(monkeypatch):
+    a, ka = _mature_track("a", 0.0, 0.5, 0.0, 40.0)
+    b, kb = _mature_track("b", 0.5, 0.0, 0.0, 40.0)
+    tracks, kalman = [a, b], {"a": ka, "b": kb}
+    cells = [sst.TCell(centroid=a.last_cell.centroid, size=10, t_start=0, t_end=0, t_ref=0.0),
+             sst.TCell(centroid=b.last_cell.centroid, size=10, t_start=0, t_end=0, t_ref=0.0),
+             _c(0.0, 0.0, 0)]
+
+    tracks, kalman = trk.update_tracks(tracks, kalman, cells, {0: 0, 1: 1})
+
+    new = tracks[-1]
+    assert new.velocity_prior and cells[2].assoc["prior_n"] == 2
+    assert kalman[new.id].velocity_kmh(0.0)[1] == pytest.approx(40.0, rel=1e-3)
+
+    # 2a célula 3 min depois, deslocada para o OESTE: com dois pontos a
+    # velocidade viraria ~-200 km/h; com o prior, o filtro só a corrige
+    second = _c(0.0, -0.1, 180)
+    trk.update_tracks(tracks, kalman, [second], {0: len(tracks) - 1})
+
+    assert second.assoc["kind"] == "continue"
+    assert kalman[new.id].velocity_kmh(0.0)[1] > -100.0
+
+
+def test_velocity_prior_survives_save_and_load(tmp_path):
+    track, kalman = _mature_track("a", 0.0, 0.0, 0.0, 40.0)
+    track.velocity_prior = True
+    path = tmp_path / "tracks.json"
+
+    trk.save_tracks(str(path), [track], {"a": kalman})
+    loaded, _ = trk.load_tracks(str(path))
+
+    assert loaded[0].velocity_prior is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# medida do Kalman pelos eventos novos (2026.nov)
+
+def _ev(ts, lat, lng):
+    return sst.TLightning(ts=ts, lat=lat, lng=lng)
+
+
+def test_measurement_needs_minimum_events():
+    events = [_ev(0, 0.0, 0.0)] * (trk.CI_MEAS_MIN_EVENTS - 1)
+
+    assert trk.measurement_from_events(events) == {"n": trk.CI_MEAS_MIN_EVENTS - 1}
+
+
+def test_measurement_is_centroid_and_mean_time():
+    meas = trk.measurement_from_events([_ev(100, 0.0, 0.0), _ev(200, 0.2, 0.0), _ev(300, 0.1, 0.3)])
+
+    assert meas["n"] == 3 and meas["t"] == pytest.approx(200.0)
+    assert meas["centroid"] == pytest.approx((0.1, 0.1))
+
+
+def test_measurement_noise_falls_with_number_of_events(monkeypatch):
+    spread = [_ev(0, 0.1 * (i % 3 - 1), 0.1 * (i % 5 - 2)) for i in range(400)]
+
+    few = trk.measurement_from_events(spread[:4])["r_std_km"]
+    many = trk.measurement_from_events(spread)["r_std_km"]
+
+    assert few > many >= klm.CF_KALMAN_R_STD_KM
+    assert many == pytest.approx(klm.CF_KALMAN_R_STD_KM, rel=0.05)
+    monkeypatch.setattr(trk, "CI_MEAS_SCALE_R", 0)
+    assert trk.measurement_from_events(spread)["r_std_km"] is None
+
+
+def test_kalman_is_updated_with_the_measurement_and_its_time():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    track_id = tracks[0].id
+    cell = _c(0.0, 0.0, 300)                    # centroide da janela parado...
+    cell.meas = {"n": 10, "centroid": (0.0, 0.1), "t": 500.0, "r_std_km": 3.0}
+
+    trk.update_tracks(tracks, kalman, [cell], {0: 0})
+
+    # ...mas a medida (eventos novos) andou 0,1 grau: dois pontos com dt = 500 s
+    assert kalman[track_id].t == 500.0
+    assert kalman[track_id].velocity_deg_h[1] == pytest.approx(0.1 / (500 / 3600.0))
+    assert cell.assoc["meas_n"] == 10
+
+
+def test_track_without_new_events_keeps_kalman_state():
+    tracks, kalman = trk.update_tracks([], {}, [_c(0.0, 0.0, 0)], {})
+    track_id = tracks[0].id
+    before = copy.deepcopy(kalman[track_id].to_dict())
+    cell = _c(0.0, 0.05, 300)
+    cell.meas = {"n": 1}
+
+    trk.update_tracks(tracks, kalman, [cell], {0: 0})
+
+    assert kalman[track_id].to_dict() == before
+    assert tracks[0].last_cell is cell and cell.assoc["meas_n"] == 1
+
+
+def test_reference_position_predicts_from_kalman_time():
+    kalman = klm.TKalmanTracker(0.0, 0.0, 0.0, 1.0, ff_t=1000.0)     # 1 grau/h para leste
+    last = _c(0.0, 0.0, 0)                                          # célula antiga (t=0)
+    cell = _c(0.0, 0.0, 1000 + 1800)
+
+    lat, lng = trk._reference_position(last, cell, kalman)
+
+    assert lng == pytest.approx(0.5)                                # 30 min desde t do filtro

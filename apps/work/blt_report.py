@@ -50,10 +50,17 @@ import numpy as np
 
 # < constants >────────────────────────────────────────────────────────────────────────
 
-# nomes dos CSVs num diretório de saída (os mesmos do blt_cfg.sh)
-CS_VERIFY_NAME = "slm_verification.csv"
-CS_ASSOC_NAME = "slm_assoc.csv"
-CS_FRAMES_NAME = "slm_frames.csv"
+# nomes dos CSVs num diretório de saída (os mesmos do blt_cfg.sh): o prefixo
+# da fonte (slm = STSC, glm = GLM) + o sufixo; as duas dividem data/state/
+CS_VERIFY_SUFFIX = "_verification.csv"
+CS_ASSOC_SUFFIX = "_assoc.csv"
+CS_FRAMES_SUFFIX = "_frames.csv"
+CS_DEFAULT_TAG = "slm"
+
+# os nomes do STSC (padrão)
+CS_VERIFY_NAME = CS_DEFAULT_TAG + CS_VERIFY_SUFFIX
+CS_ASSOC_NAME = CS_DEFAULT_TAG + CS_ASSOC_SUFFIX
+CS_FRAMES_NAME = CS_DEFAULT_TAG + CS_FRAMES_SUFFIX
 
 # qui-quadrado de 2 graus de liberdade (z2 e NIS bem calibrados)
 CF_CHI2_MEAN = 2.0
@@ -92,21 +99,38 @@ def read_csv(fs_path: str) -> list:
         return list(csv.DictReader(l_file))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-def build(fs_dir: str) -> dict:
+def csv_names(fs_tag: str = CS_DEFAULT_TAG) -> dict:
     """
-    resume os três CSVs de um diretório.
+    os nomes dos três CSVs de uma fonte.
 
-    :param fs_dir: diretório com slm_verification.csv, slm_assoc.csv e slm_frames.csv
-                   (os que faltarem contam como vazios)
+    :param fs_tag: prefixo da fonte ("slm" ou "glm")
+    :returns: {"verify": ..., "assoc": ..., "frames": ...}
+    """
+    return {"verify": fs_tag + CS_VERIFY_SUFFIX,
+            "assoc":  fs_tag + CS_ASSOC_SUFFIX,
+            "frames": fs_tag + CS_FRAMES_SUFFIX}
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def build(fs_dir: str, fs_tag: str = CS_DEFAULT_TAG) -> dict:
+    """
+    resume os três CSVs de uma fonte num diretório.
+
+    [fix] com data/ comum às duas fontes, os nomes levam o prefixo da fonte:
+    antes eram fixos (slm_*) e o --report-only nunca via os CSVs do GLM.
+
+    :param fs_dir: diretório com <tag>_verification.csv, <tag>_assoc.csv e
+                   <tag>_frames.csv (os que faltarem contam como vazios)
+    :param fs_tag: prefixo da fonte ("slm" ou "glm")
     :returns: {"verification": [...], "association": {...}, "tracks": {...}, "frames": {...}}
     """
-    llst_assoc_rows = read_csv(os.path.join(fs_dir, CS_ASSOC_NAME))
+    ldct_names = csv_names(fs_tag)
+    llst_assoc_rows = read_csv(os.path.join(fs_dir, ldct_names["assoc"]))
 
     return {
-        "verification": summarize_verification(read_csv(os.path.join(fs_dir, CS_VERIFY_NAME))),
+        "verification": summarize_verification(read_csv(os.path.join(fs_dir, ldct_names["verify"]))),
         "association":  summarize_association(llst_assoc_rows),
         "tracks":       summarize_tracks(llst_assoc_rows),
-        "frames":       summarize_frames(read_csv(os.path.join(fs_dir, CS_FRAMES_NAME))),
+        "frames":       summarize_frames(read_csv(os.path.join(fs_dir, ldct_names["frames"]))),
     }
 
 # ═════════════════════════════════════════════════════════════════════════════════════

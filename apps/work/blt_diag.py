@@ -27,6 +27,8 @@ kinds de célula (TCell.assoc, preenchido por blt_track.update_tracks):
 os dois CSVs crescem por append (blt_ioutil.append_csv_rows) e são
 rotacionados pelo check_log_size do blt_run.sh, como o de verificação.
 
+2026.nov  mlabru  meas_n (associação): eventos novos da medida do Kalman
+2026.nov  mlabru  prior_n (associação): vizinhos da velocidade inicial do track novo
 2026.nov  mlabru  rate_now, jump_sigma e jump (associação) e n_jump (frame): glm_ljump
 2026.nov  mlabru  initial version
 """
@@ -44,7 +46,7 @@ import work.blt_ioutil as iou
 
 # colunas do CSV de associação, na ordem do arquivo
 CLST_ASSOC_COLUMNS = ["frame_ts", "track_id", "kind", "dt_min", "dist_km", "score",
-                      "size_prev", "size", "nis", "rate_now", "jump_sigma", "jump"]
+                      "size_prev", "size", "nis", "rate_now", "jump_sigma", "jump", "prior_n", "meas_n"]
 
 # colunas do CSV de frames, na ordem do arquivo
 CLST_FRAME_COLUMNS = ["frame_ts", "run_ts", "latency_s", "n_window_events", "n_clustered",

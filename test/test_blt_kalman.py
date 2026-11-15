@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 import work.blt_geo as geo
@@ -203,3 +205,36 @@ def test_noise_defaults_read_when_filter_is_created(monkeypatch):
 
     assert (k.r, k.q_vel) == pytest.approx((0.05 ** 2, 0.1 ** 2))
     assert klm._TKalman1D(0.0, r=0.1).r == 0.1
+
+
+def test_from_velocity_prior_sets_velocity_and_its_uncertainty_per_axis():
+    tracker = klm.TKalmanTracker.from_velocity_prior(-30.0, -50.0, (10.0, 40.0), (5.0, 20.0))
+
+    v_north, v_east = tracker.velocity_kmh(-30.0)
+    assert (v_north, v_east) == (pytest.approx(10.0), pytest.approx(40.0))
+    km_lng = klm.geo.km_per_deg_lng(-30.0)
+    assert math.sqrt(tracker._lat.p_vv) * klm.geo.CF_KM_PER_DEG_LAT == pytest.approx(5.0)
+    assert math.sqrt(tracker._lng.p_vv) * km_lng == pytest.approx(20.0)
+
+
+def test_tracker_time_round_trips_and_old_state_has_none():
+    tracker = klm.TKalmanTracker(-23.5, -46.6, ff_t=1234.5)
+
+    state = tracker.to_dict()
+    restored = klm.TKalmanTracker.from_dict(state)
+    del state["t"]
+
+    assert restored.t == 1234.5
+    assert klm.TKalmanTracker.from_dict(state).t is None
+
+
+def test_update_with_larger_measurement_noise_moves_less():
+    a = klm.TKalmanTracker(0.0, 0.0)
+    b = klm.TKalmanTracker(0.0, 0.0)
+    for k in (a, b):
+        k.predict(5 / 60)
+
+    a.update(0.1, 0.0, ff_r_std_km=1.0)
+    b.update(0.1, 0.0, ff_r_std_km=20.0)
+
+    assert a.predict_position(0)[0] > b.predict_position(0)[0] > 0.0

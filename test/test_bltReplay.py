@@ -221,3 +221,18 @@ def test_main_errors(tmp_path):
     empty = tmp_path / "empty.csv"
     empty.write_text("timestamp,lat,lng\n")
     assert rp.main(["-o", str(tmp_path), str(empty)]) == rp.CI_RC_NO_DATA
+
+
+def test_report_only_reads_the_csvs_of_the_chosen_source(tmp_path, capsys):
+    # GLM e STSC dividem o diretório: o resumo do GLM lê os glm_*
+    head = ("frame_ts,run_ts,latency_s,n_window_events,n_clustered,n_cells,"
+            "n_new,n_split,n_missed,n_merged,n_expired\n")
+    (tmp_path / "glm_frames.csv").write_text(head + "1000,1060,60,100,90,7,7,0,0,0,0\n")
+    (tmp_path / "slm_frames.csv").write_text(head + "1000,1900,900,50,20,3,3,0,0,0,0\n")
+
+    assert rp.main(["--report-only", "--source", "glm", "-o", str(tmp_path)]) == rp.CI_RC_OK
+    glm_report = capsys.readouterr().out
+    assert rp.main(["--report-only", "-o", str(tmp_path)]) == rp.CI_RC_OK
+    slm_report = capsys.readouterr().out
+
+    assert glm_report != slm_report

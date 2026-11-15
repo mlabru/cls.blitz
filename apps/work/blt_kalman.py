@@ -29,6 +29,11 @@ do filtro (a da longitude na latitude de nascimento do track).  Assim o filtro
 é isotrópico em km: um grau de longitude a 33°S tem só 84% de um de latitude.
 q_pos/q_vel/r gravados continuam em graus², então estados antigos valem.
 
+2026.nov  mlabru  TKalmanTracker.t (instante do estado, gravado como "t"; None em
+                  estados antigos) e ruído de medida por update (ff_r_std_km:
+                  a medida dos eventos novos tem erro que depende de n)
+2026.nov  mlabru  from_velocity_prior (track novo com a velocidade dos vizinhos,
+                  blt_track) e velocity_kmh
 2026.nov  mlabru  ruídos em km, convertidos por eixo (eram graus² iguais nos dois
                   eixos: a longitude ficava com ruído menor em km)
 2026.nov  mlabru  filtro novo com variância da posição = r (era 1 grau², ~111 km)
@@ -185,7 +190,8 @@ class _TKalman1D:
         self.p_vv = lf_new_p_vv
 
     # ─────────────────────────────────────────────────────────────────────────────────
-    def normalized_innovation_sq(self, ff_measured_position: float) -> float:
+    def normalized_innovation_sq(self, ff_measured_position: float,
+                                 ff_r: float | None = None) -> float:
         """
         inovação normalizada ao quadrado: (medida − previsão)² / (p_xx + r).
         Chamar DEPOIS do predict e ANTES do update.
@@ -194,20 +200,23 @@ class _TKalman1D:
         eixos: 2, ver TKalmanTracker.nis).
 
         :param ff_measured_position: posição medida (graus)
+        :param ff_r: ruído desta medida (graus²); None = self.r
         :returns: valor adimensional >= 0
         """
         lf_innovation = ff_measured_position - self.x
+        lf_r = self.r if ff_r is None else ff_r
 
-        return lf_innovation * lf_innovation / (self.p_xx + self.r)
+        return lf_innovation * lf_innovation / (self.p_xx + lf_r)
 
     # ─────────────────────────────────────────────────────────────────────────────────
-    def update(self, ff_measured_position: float) -> None:
+    def update(self, ff_measured_position: float, ff_r: float | None = None) -> None:
         """
         corrige o estado com uma posição observada.
 
         :param ff_measured_position: posição medida (graus)
+        :param ff_r: ruído desta medida (graus²); None = self.r
         """
-        lf_innovation_variance = self.p_xx + self.r
+        lf_innovation_variance = self.p_xx + (self.r if ff_r is None else ff_r)
         lf_gain_position = self.p_xx / lf_innovation_variance
         lf_gain_velocity = self.p_xv / lf_innovation_variance
 
@@ -277,7 +286,7 @@ class TKalmanTracker:
     """
     # ─────────────────────────────────────────────────────────────────────────────────
     def __init__(self, ff_lat0: float, ff_lng0: float,
-                 ff_vlat: float = 0.0, ff_vlng: float = 0.0):
+                 ff_vlat: float = 0.0, ff_vlng: float = 0.0, ff_t: float | None = None):
         """
         cria o rastreador numa posição conhecida.
 
@@ -285,13 +294,19 @@ class TKalmanTracker:
         :param ff_lng0: longitude inicial (graus)
         :param ff_vlat: velocidade inicial em latitude (graus/hora)
         :param ff_vlng: velocidade inicial em longitude (graus/hora)
+        :param ff_t: instante da posição (epoch UTC); None = desconhecido
         """
         self._lat = _TKalman1D(ff_lat0, ff_vlat)
         self._lng = _TKalman1D(ff_lng0, ff_vlng, ff_km_per_deg=geo.km_per_deg_lng(ff_lat0))
+        # [new] instante a que o estado se refere (o da última medida): o
+        # predict até uma célula conta daqui.  None = estado antigo, sem o
+        # campo (blt_track usa o instante da última célula)
+        self.t = ff_t
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @classmethod
-    def from_two_points(cls, ft_pos1: tuple, ft_pos2: tuple, ff_dt_h: float) -> TKalmanTracker:
+    def from_two_points(cls, ft_pos1: tuple, ft_pos2: tuple, ff_dt_h: float,
+                        ff_t: float | None = None) -> TKalmanTracker:
         """
         rastreador iniciado pelas duas primeiras posições de um track.
 
@@ -304,14 +319,55 @@ class TKalmanTracker:
         :param ft_pos1: (lat, lng) anterior
         :param ft_pos2: (lat, lng) atual
         :param ff_dt_h: intervalo entre as duas, em horas (> 0)
+        :param ff_t: instante da posição atual (epoch UTC)
         :returns: novo rastreador na posição atual
         """
         l_tracker = cls.__new__(cls)
+        l_tracker.t = ff_t
         l_tracker._lat = _TKalman1D.from_two_points(ft_pos1[0], ft_pos2[0], ff_dt_h)
         l_tracker._lng = _TKalman1D.from_two_points(ft_pos1[1], ft_pos2[1], ff_dt_h,
                                                     geo.km_per_deg_lng(ft_pos2[0]))
 
         return l_tracker
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    @classmethod
+    def from_velocity_prior(cls, ff_lat: float, ff_lng: float,
+                            ft_velocity_kmh: tuple, ft_velocity_std_kmh: tuple,
+                            ff_t: float | None = None) -> TKalmanTracker:
+        """
+        rastreador novo numa posição medida, com uma velocidade a priori (a
+        dos tracks vizinhos, blt_track._neighbor_velocity_prior) e a incerteza
+        dela, em vez de velocidade zero com CF_INITIAL_VEL_STD_KMH.
+
+        :param ff_lat: latitude (graus)
+        :param ff_lng: longitude (graus)
+        :param ft_velocity_kmh: (norte, leste) em km/h
+        :param ft_velocity_std_kmh: desvio-padrão (norte, leste) em km/h
+        :param ff_t: instante da posição (epoch UTC)
+        :returns: novo rastreador
+        """
+        lf_km_per_deg_lng = geo.km_per_deg_lng(ff_lat)
+
+        l_tracker = cls(ff_lat, ff_lng,
+                        ft_velocity_kmh[0] / geo.CF_KM_PER_DEG_LAT,
+                        ft_velocity_kmh[1] / lf_km_per_deg_lng, ff_t)
+
+        l_tracker._lat.p_vv = _deg_var(ft_velocity_std_kmh[0], geo.CF_KM_PER_DEG_LAT)
+        l_tracker._lng.p_vv = _deg_var(ft_velocity_std_kmh[1], lf_km_per_deg_lng)
+
+        return l_tracker
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    def velocity_kmh(self, ff_lat: float) -> tuple:
+        """
+        velocidade estimada em km/h, por eixo.
+
+        :param ff_lat: latitude em que converter a longitude (graus)
+        :returns: (norte, leste) em km/h
+        """
+        return (self._lat.v * geo.CF_KM_PER_DEG_LAT,
+                self._lng.v * geo.km_per_deg_lng(ff_lat))
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def spawn_at(self, ff_lat: float, ff_lng: float) -> TKalmanTracker:
@@ -331,18 +387,37 @@ class TKalmanTracker:
         return l_child
 
     # ─────────────────────────────────────────────────────────────────────────────────
-    def update(self, ff_lat: float, ff_lng: float) -> None:
+    def update(self, ff_lat: float, ff_lng: float, ff_r_std_km: float | None = None) -> None:
         """
         corrige o estado com uma posição observada.
 
         :param ff_lat: latitude observada (graus)
         :param ff_lng: longitude observada (graus)
+        :param ff_r_std_km: desvio-padrão desta medida (km, por eixo); None =
+                            o ruído do filtro (CF_KALMAN_R_STD_KM na criação)
         """
-        self._lat.update(ff_lat)
-        self._lng.update(ff_lng)
+        lf_r_lat, lf_r_lng = self._measurement_var(ff_lat, ff_r_std_km)
+
+        self._lat.update(ff_lat, lf_r_lat)
+        self._lng.update(ff_lng, lf_r_lng)
 
     # ─────────────────────────────────────────────────────────────────────────────────
-    def nis(self, ff_lat: float, ff_lng: float) -> float:
+    def _measurement_var(self, ff_lat: float, ff_r_std_km: float | None) -> tuple:
+        """
+        o ruído de uma medida em graus², por eixo.
+
+        :param ff_lat: latitude da medida (escala da longitude)
+        :param ff_r_std_km: desvio-padrão em km; None = o de cada filtro
+        :returns: (r_lat, r_lng), ou (None, None) para usar o do filtro
+        """
+        if ff_r_std_km is None:
+            return None, None
+
+        return (_deg_var(ff_r_std_km, geo.CF_KM_PER_DEG_LAT),
+                _deg_var(ff_r_std_km, geo.km_per_deg_lng(ff_lat)))
+
+    # ─────────────────────────────────────────────────────────────────────────────────
+    def nis(self, ff_lat: float, ff_lng: float, ff_r_std_km: float | None = None) -> float:
         """
         NIS (normalized innovation squared) da posição observada: a soma da
         inovação normalizada dos dois eixos.  Chamar DEPOIS do predict e ANTES
@@ -355,10 +430,13 @@ class TKalmanTracker:
 
         :param ff_lat: latitude observada (graus)
         :param ff_lng: longitude observada (graus)
+        :param ff_r_std_km: desvio-padrão desta medida (km); None = o do filtro
         :returns: NIS (adimensional, >= 0)
         """
-        return (self._lat.normalized_innovation_sq(ff_lat) +
-                self._lng.normalized_innovation_sq(ff_lng))
+        lf_r_lat, lf_r_lng = self._measurement_var(ff_lat, ff_r_std_km)
+
+        return (self._lat.normalized_innovation_sq(ff_lat, lf_r_lat) +
+                self._lng.normalized_innovation_sq(ff_lng, lf_r_lng))
 
     # ─────────────────────────────────────────────────────────────────────────────────
     def predict(self, ff_dt_h: float) -> None:
@@ -406,10 +484,12 @@ class TKalmanTracker:
         """
         estado completo, para gravar em JSON.
 
-        :returns: {"lat": {...}, "lng": {...}} com os atributos de cada _TKalman1D
+        :returns: {"lat": {...}, "lng": {...}, "t": instante} com os atributos
+                  de cada _TKalman1D
         """
         return {"lat": vars(self._lat),
-                "lng": vars(self._lng)}
+                "lng": vars(self._lng),
+                "t":   self.t}
 
     # ─────────────────────────────────────────────────────────────────────────────────
     @classmethod
@@ -435,6 +515,9 @@ class TKalmanTracker:
 
         l_tracker._lng = _TKalman1D.__new__(_TKalman1D)
         l_tracker._lng.__dict__.update(fdct_state["lng"])
+
+        # estados gravados antes de 2026.nov não têm o instante
+        l_tracker.t = fdct_state.get("t")
 
         return l_tracker
 

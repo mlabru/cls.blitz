@@ -20,6 +20,16 @@ acompanhamento (tracking) das células convectivas de um frame para o outro.
 fluxo de um frame (chamado por bltTracker.process):
   load_tracks -> expire_stale_tracks -> associate_cells -> update_tracks -> save_tracks
 
+2026.nov  mlabru  medida do Kalman só com os eventos novos do cluster
+                  (measurement_from_events, TCell.meas): centroide e instante
+                  médio dos eventos desde o frame anterior, ruído que cai com
+                  o número deles; o filtro guarda o instante do estado
+                  (TKalmanTracker.t) e o predict conta dele (_kalman_time)
+2026.nov  mlabru  velocidade inicial pelos tracks vizinhos
+                  (_neighbor_velocity_prior): o track novo nasce com a média
+                  ponderada da velocidade dos tracks maduros próximos e não é
+                  reiniciado por dois pontos (velocidade de ~3 min de
+                  deslocamento do centroide, pior que a persistência)
 2026.nov  mlabru  diagnóstico da associação em TCell.assoc (distância até a
                   previsão, score, NIS; vizinho mais próximo das células sem
                   par) e motivo do fim do track (TStormTrack.end_reason);
@@ -122,6 +132,39 @@ CF_MIN_DENSITY_RADIUS_KM = 1.0
 # comprimento do ID de track (caracteres do UUID4)
 CI_TRACK_ID_LENGTH = 8
 
+# [new] velocidade inicial pelos vizinhos (_neighbor_velocity_prior): um track
+# novo herda a média ponderada da velocidade dos tracks maduros que continuaram
+# neste frame a até CF_PRIOR_RADIUS_KM.  Tempestades próximas andam com o mesmo
+# fluxo de condução; a velocidade por dois pontos (~3 min de deslocamento do
+# centroide) tem σ de ~100 km/h e deixava a 2a previsão do track pior que a
+# persistência (STSC: skill -0,49; GLM: -0,16, em 14/11/2026)
+CF_PRIOR_RADIUS_KM = 150.0
+# vizinhos mínimos (menos que isso: velocidade zero e dois pontos, como antes)
+CI_PRIOR_MIN_NEIGHBORS = 2
+# células mínimas no histórico de um vizinho para ele contar (já passou pelos
+# dois pontos e por pelo menos um ciclo predict -> update)
+CI_PRIOR_MIN_HISTORY = 3
+# desvio-padrão mínimo da velocidade a priori (km/h, por eixo): vizinhos que
+# concordam entre si não tornam o filtro novo confiante demais
+CF_PRIOR_MIN_VEL_STD_KMH = 10.0
+
+# [new] medida do Kalman (measurement_from_events).  A janela de agrupamento
+# (20 min ou 4 imagens) desliza de 5 em 5 min: 75% dos eventos repetem de um
+# frame para o outro, e o centroide da janela inteira dava ao filtro medidas
+# com erro correlacionado (ele supõe erro independente): NIS ~8 contra 2
+# esperado, e previsão pior que persistência.  Com CI_MEAS_NEW_ONLY, a medida
+# é o centroide só dos eventos chegados desde o frame anterior, no instante
+# médio deles; a janela inteira continua definindo a célula (detecção,
+# associação, tamanho).  0 = centroide da janela (o de antes), para comparar
+CI_MEAS_NEW_ONLY = 1
+# eventos novos mínimos para haver medida (menos: o track continua, mas o
+# Kalman só é atualizado num frame com medida)
+CI_MEAS_MIN_EVENTS = 3
+# ruído da medida: sqrt(CF_KALMAN_R_STD_KM² + s²/n), com s o desvio-padrão por
+# eixo da posição dos n eventos: o centroide de 400 eventos erra menos que o
+# de 4.  0 = ruído fixo (CF_KALMAN_R_STD_KM)
+CI_MEAS_SCALE_R = 1
+
 # < logging >──────────────────────────────────────────────────────────────────────────
 
 M_LOG = logging.getLogger(__name__)
@@ -190,6 +233,69 @@ def compute_flash_rate(flst_cluster: list, ff_delta_min: float) -> float:
         return 0.0
 
     return len(flst_cluster) / ff_delta_min
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def measurement_from_events(flst_events: list) -> dict:
+    """
+    a medida de posição que o Kalman recebe de uma célula: centroide e
+    instante médio dos eventos dados (os novos do cluster) e o ruído dela.
+
+    :param flst_events: TLightning (os eventos do cluster desde o frame anterior)
+    :returns: {"n": n} se n < CI_MEAS_MIN_EVENTS (sem medida); senão
+              {"n", "centroid": (lat, lng), "t": instante médio, "r_std_km":
+              desvio-padrão da medida por eixo, ou None (ruído do filtro)}
+    """
+    li_count = len(flst_events)
+
+    if li_count < CI_MEAS_MIN_EVENTS:
+        return {"n": li_count}
+
+    lt_centroid = compute_centroid(flst_events)
+    lf_mean_ts = sum(l_event.ts for l_event in flst_events) / li_count
+
+    lf_r_std_km = None
+
+    if CI_MEAS_SCALE_R:
+        # desvio-padrão por eixo: a distância quadrática média ao centroide / 2
+        lf_mean_sq_km = sum(spc.haversine_km(l_event.lat, l_event.lng,
+                                             lt_centroid[0], lt_centroid[1]) ** 2
+                            for l_event in flst_events) / li_count
+        lf_r_std_km = math.sqrt(klm.CF_KALMAN_R_STD_KM ** 2 + lf_mean_sq_km / 2.0 / li_count)
+
+    return {"n": li_count, "centroid": lt_centroid, "t": lf_mean_ts, "r_std_km": lf_r_std_km}
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _measurement(f_cell: sst.TCell) -> tuple | None:
+    """
+    a medida da célula para o Kalman.
+
+    :param f_cell: célula (meas preenchido por bltTracker; vazio = célula
+                   montada sem ele: vale o centroide da janela no instante da
+                   célula, como antes)
+    :returns: ((lat, lng), instante, r_std_km ou None); None = sem medida neste
+              frame (poucos eventos novos)
+    """
+    if not f_cell.meas:
+        return f_cell.centroid, sst.cell_time(f_cell), None
+
+    if "centroid" not in f_cell.meas:
+        return None
+
+    return f_cell.meas["centroid"], f_cell.meas["t"], f_cell.meas["r_std_km"]
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _kalman_time(f_kalman: klm.TKalmanTracker | None, f_last_cell: sst.TCell) -> float:
+    """
+    o instante a que o estado do Kalman se refere.
+
+    :param f_kalman: filtro (pode não ter o instante: estado antigo)
+    :param f_last_cell: última célula do track (o instante dela é o substituto)
+    :returns: epoch UTC
+    """
+    if f_kalman is not None and f_kalman.t is not None:
+        return f_kalman.t
+
+    return sst.cell_time(f_last_cell)
 
 # ═════════════════════════════════════════════════════════════════════════════════════
 # associação entre frames
@@ -361,7 +467,10 @@ def _reference_position(f_last_cell: sst.TCell, f_cell: sst.TCell,
     if f_kalman is None:
         return f_last_cell.centroid[0], f_last_cell.centroid[1]
 
-    lf_elapsed_hours = max(mtn.elapsed_hours(f_last_cell, f_cell), 0.0)
+    # [fix] desde o instante do estado do filtro (a última medida), não o da
+    # última célula: com a medida dos eventos novos os dois diferem
+    lf_elapsed_hours = max((sst.cell_time(f_cell) - _kalman_time(f_kalman, f_last_cell)) /
+                           mtn.CF_SECONDS_PER_HOUR, 0.0)
 
     lf_lat, lf_lng, _, _ = f_kalman.predict_position(lf_elapsed_hours)
 
@@ -465,10 +574,13 @@ def update_tracks(flst_tracks: list, ldct_kalman_states: dict,
             continue
 
         l_parent = _split_parent(l_cell, llst_continued_tracks)
-        _start_new_track(l_cell, flst_tracks, ldct_kalman_states, l_parent)
+        lt_prior = None if l_parent is not None else _neighbor_velocity_prior(
+                       l_cell, llst_continued_tracks, ldct_kalman_states)
+        _start_new_track(l_cell, flst_tracks, ldct_kalman_states, l_parent, lt_prior)
 
         l_cell.assoc = _new_cell_diagnostics(l_cell, l_parent, llst_unmatched_tracks,
                                              ldct_kalman_states)
+        l_cell.assoc["prior_n"] = lt_prior[2] if lt_prior is not None else 0
 
     for li_track_index in range(li_existing_track_count):
         l_track = flst_tracks[li_track_index]
@@ -524,23 +636,38 @@ def _continue_track(f_track: sst.TStormTrack, f_cell: sst.TCell,
     f_track.missed_frames = 0
 
     l_kalman = fdct_kalman_states[f_cell.id]
-    lb_two_point = _needs_two_point_init(f_track, lf_elapsed_hours)
+    lt_meas = _measurement(f_cell)
+
+    # intervalo desde o estado do filtro até a medida (0 sem medida)
+    lf_meas_dt_h = 0.0 if lt_meas is None else max(
+        (lt_meas[1] - _kalman_time(l_kalman, l_previous_cell)) / mtn.CF_SECONDS_PER_HOUR, 0.0)
+
+    lb_two_point = lt_meas is not None and _needs_two_point_init(f_track, lf_meas_dt_h)
 
     # [new] diagnóstico (blt_diag), medido contra o filtro ANTES do update
     f_cell.assoc = _continue_diagnostics(l_previous_cell, f_cell, l_kalman,
                                          lf_elapsed_hours, lb_two_point)
+    f_cell.assoc["meas_n"] = f_cell.meas.get("n", f_cell.size)
 
-    if lb_two_point:
-        l_kalman = klm.TKalmanTracker.from_two_points(l_previous_cell.centroid,
-                                                      f_cell.centroid, lf_elapsed_hours)
+    if lt_meas is None:
+        # [new] poucos eventos novos: a célula continua o track, mas o filtro
+        # fica no instante da última medida (o predict do próximo frame
+        # cobre o intervalo inteiro)
+        pass
+
+    elif lb_two_point:
+        lt_previous = l_kalman.predict_position(0.0)[:2]
+        l_kalman = klm.TKalmanTracker.from_two_points(lt_previous, lt_meas[0], lf_meas_dt_h,
+                                                      lt_meas[1])
         fdct_kalman_states[f_cell.id] = l_kalman
 
     else:
-        # o filtro de Kalman exige o ciclo predict -> update a cada frame
-        l_kalman.predict(lf_elapsed_hours)
+        # o filtro de Kalman exige o ciclo predict -> update a cada medida
+        l_kalman.predict(lf_meas_dt_h)
         # NIS entre o predict e o update: a inovação que o filtro vai corrigir
-        f_cell.assoc["nis"] = l_kalman.nis(f_cell.centroid[0], f_cell.centroid[1])
-        l_kalman.update(f_cell.centroid[0], f_cell.centroid[1])
+        f_cell.assoc["nis"] = l_kalman.nis(lt_meas[0][0], lt_meas[0][1], lt_meas[2])
+        l_kalman.update(lt_meas[0][0], lt_meas[0][1], lt_meas[2])
+        l_kalman.t = lt_meas[1]
 
     # [fix] uma só velocidade: antes era a EMA dos centroides (seta) contra o
     # Kalman (cone), que podiam divergir
@@ -623,7 +750,8 @@ def _needs_two_point_init(f_track: sst.TStormTrack, ff_elapsed_hours: float) -> 
     a célula que acabou de entrar é a segunda do track, e dá para iniciar a
     velocidade do Kalman pelo deslocamento entre as duas?
 
-    não vale para track filho de divisão (já herdou a velocidade do pai) nem
+    não vale para track filho de divisão (já herdou a velocidade do pai), nem
+    para track que nasceu com a velocidade dos vizinhos (velocity_prior), nem
     com intervalo menor que CF_MIN_TWO_POINT_DT_MIN (o deslocamento seria
     quase só ruído); nesses casos o filtro segue o ciclo predict -> update.
 
@@ -631,39 +759,109 @@ def _needs_two_point_init(f_track: sst.TStormTrack, ff_elapsed_hours: float) -> 
     :param ff_elapsed_hours: horas entre a célula anterior e a nova
     :returns: True se deve reiniciar com klm.TKalmanTracker.from_two_points
     """
-    if 2 != len(f_track.history) or f_track.parent_id:
+    if 2 != len(f_track.history) or f_track.parent_id or f_track.velocity_prior:
         return False
 
     return ff_elapsed_hours * mtn.CF_MINUTES_PER_HOUR >= CF_MIN_TWO_POINT_DT_MIN
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _start_new_track(f_cell: sst.TCell, flst_tracks: list, fdct_kalman_states: dict,
-                     f_parent: sst.TStormTrack | None = None) -> None:
+                     f_parent: sst.TStormTrack | None = None,
+                     ft_prior: tuple | None = None) -> None:
     """
     abre um track novo a partir de uma célula sem associação: ID novo e a
     célula como primeiro elemento do histórico.  O Kalman nasce na posição
-    dela com velocidade zero -- ou, se for filho de divisão (f_parent), com a
-    velocidade e as covariâncias do pai (TKalmanTracker.spawn_at).
+    dela: se for filho de divisão (f_parent), com a velocidade e as
+    covariâncias do pai (TKalmanTracker.spawn_at); se houver vizinhos
+    (ft_prior), com a velocidade deles (TKalmanTracker.from_velocity_prior);
+    senão, com velocidade zero.
 
     :param f_cell: célula do frame atual (recebe o ID novo e o parent_id)
     :param flst_tracks: lista de tracks (o novo é acrescentado no fim)
     :param fdct_kalman_states: {id do track: TKalmanTracker} (recebe o novo)
     :param f_parent: track de onde a célula se dividiu; None = nasceu sozinha
+    :param ft_prior: (velocidade, desvio-padrão, vizinhos) de
+                     _neighbor_velocity_prior; None = sem vizinhos
     """
     f_cell.id = generate_track_id()
     f_cell.parent_id = f_parent.id if f_parent is not None else ""
 
     flst_tracks.append(sst.TStormTrack(id=f_cell.id, history=[f_cell],
-                                       parent_id=f_cell.parent_id))
+                                       parent_id=f_cell.parent_id,
+                                       velocity_prior=ft_prior is not None and f_parent is None))
 
-    if f_parent is None:
-        fdct_kalman_states[f_cell.id] = klm.TKalmanTracker(f_cell.centroid[0], f_cell.centroid[1])
+    # [new] o filtro nasce na medida (eventos novos) e no instante dela; sem
+    # medida (poucos eventos novos), no centroide da janela
+    lt_meas = _measurement(f_cell) or (f_cell.centroid, sst.cell_time(f_cell), None)
+    (lf_lat, lf_lng), lf_t = lt_meas[0], lt_meas[1]
+
+    if f_parent is None and ft_prior is not None:
+        fdct_kalman_states[f_cell.id] = klm.TKalmanTracker.from_velocity_prior(
+            lf_lat, lf_lng, ft_prior[0], ft_prior[1], lf_t)
         return
 
-    fdct_kalman_states[f_cell.id] = fdct_kalman_states[f_parent.id].spawn_at(f_cell.centroid[0],
-                                                                            f_cell.centroid[1])
+    if f_parent is None:
+        fdct_kalman_states[f_cell.id] = klm.TKalmanTracker(lf_lat, lf_lng, ff_t=lf_t)
+        return
+
+    l_child = fdct_kalman_states[f_parent.id].spawn_at(lf_lat, lf_lng)
+    l_child.t = lf_t
+    fdct_kalman_states[f_cell.id] = l_child
 
     M_LOG.info("divisão: track %s nasceu de %s.", f_cell.id, f_parent.id)
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _neighbor_velocity_prior(f_cell: sst.TCell, flst_continued_tracks: list,
+                             fdct_kalman_states: dict) -> tuple | None:
+    """
+    velocidade a priori de um track novo: a média da velocidade (Kalman) dos
+    tracks maduros que continuaram neste frame, a até CF_PRIOR_RADIUS_KM da
+    célula, com peso gaussiano pela distância (σ = metade do raio).
+
+    a incerteza é o espalhamento ponderado das velocidades dos vizinhos, por
+    eixo, com piso CF_PRIOR_MIN_VEL_STD_KMH.
+
+    :param f_cell: célula que abre o track
+    :param flst_continued_tracks: tracks que receberam célula neste frame
+                                  (Kalman já atualizado)
+    :param fdct_kalman_states: {id do track: TKalmanTracker}
+    :returns: ((norte, leste) km/h, (σ norte, σ leste) km/h, nº de vizinhos);
+              None com menos de CI_PRIOR_MIN_NEIGHBORS vizinhos
+    """
+    lf_lat, lf_lng = f_cell.centroid
+    lf_sigma_km = CF_PRIOR_RADIUS_KM / 2.0
+
+    llst_weights = []
+    llst_velocities = []
+
+    for l_track in flst_continued_tracks:
+        l_kalman = fdct_kalman_states.get(l_track.id)
+
+        if l_kalman is None or len(l_track.history) < CI_PRIOR_MIN_HISTORY:
+            continue
+
+        lt_position = l_track.last_cell.centroid
+        lf_distance_km = spc.haversine_km(lf_lat, lf_lng, lt_position[0], lt_position[1])
+
+        if lf_distance_km > CF_PRIOR_RADIUS_KM:
+            continue
+
+        llst_weights.append(math.exp(-0.5 * (lf_distance_km / lf_sigma_km) ** 2))
+        llst_velocities.append(l_kalman.velocity_kmh(lt_position[0]))
+
+    if len(llst_velocities) < CI_PRIOR_MIN_NEIGHBORS:
+        return None
+
+    lf_weight_sum = sum(llst_weights)
+    lt_mean = tuple(sum(lf_w * lt_v[li] for lf_w, lt_v in zip(llst_weights, llst_velocities)) /
+                    lf_weight_sum for li in (0, 1))
+    lt_std = tuple(max(CF_PRIOR_MIN_VEL_STD_KMH,
+                       math.sqrt(sum(lf_w * (lt_v[li] - lt_mean[li]) ** 2
+                                     for lf_w, lt_v in zip(llst_weights, llst_velocities)) /
+                                 lf_weight_sum))
+                   for li in (0, 1))
+
+    return lt_mean, lt_std, len(llst_velocities)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _split_parent(f_cell: sst.TCell, flst_continued_tracks: list,
@@ -883,7 +1081,8 @@ def _track_from_dict(fdct_track: dict) -> sst.TStormTrack:
                                     for ldct_cell in fdct_track["history"]],
                            # [fix] estado gravado antes de 2026.nov não tem as chaves
                            forecasts=fdct_track.get("forecasts", []),
-                           parent_id=fdct_track.get("parent_id", ""))
+                           parent_id=fdct_track.get("parent_id", ""),
+                           velocity_prior=fdct_track.get("velocity_prior", False))
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def save_tracks(fs_path: str, flst_tracks: list, ldct_kalman_states: dict,
@@ -954,6 +1153,7 @@ def _track_to_dict(f_track: sst.TStormTrack) -> dict:
         "history":       [sst.cell_to_dict(l_cell) for l_cell in f_track.history],
         "forecasts":     f_track.forecasts,
         "parent_id":     f_track.parent_id,
+        "velocity_prior": f_track.velocity_prior,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────────────

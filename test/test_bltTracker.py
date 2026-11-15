@@ -642,3 +642,21 @@ def test_cluster_window_without_jump_since_leaves_fields_zero():
     cell = trkmod.cluster_window(events, fi_window_images=0)[0]
 
     assert (cell.flash_rate_now, cell.jump_sigma, cell.lightning_jump) == (0.0, 0.0, False)
+
+
+def test_cluster_window_measurement_uses_only_new_events():
+    old = [sst.TLightning(ts=100.0, lat=0.0, lng=0.0) for _ in range(20)]
+    new = [sst.TLightning(ts=400.0, lat=0.0, lng=0.05) for _ in range(10)]
+
+    cell = trkmod.cluster_window(old + new, fi_window_images=0, ff_meas_since_ts=300.0)[0]
+
+    assert cell.size == 30
+    assert cell.meas["n"] == 10 and cell.meas["t"] == 400.0
+    assert cell.meas["centroid"] == pytest.approx((0.0, 0.05))
+
+
+def test_forecast_offset_counts_from_kalman_time():
+    kalman = trkmod.trk.klm.TKalmanTracker(0.0, 0.0, ff_t=1000.0)
+    cell = sst.TCell(t_ref=400.0)
+
+    assert trkmod._forecast_offset_h(kalman, cell, 4600.0) == pytest.approx(1.0)

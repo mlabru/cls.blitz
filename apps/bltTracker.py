@@ -47,6 +47,9 @@ uma linha "NEWEST_TS=<ts do evento mais recente>" (ver main).
             --verify-file data/state/slm_verification.csv \
             --assoc-file data/state/slm_assoc.csv --frames-file data/state/slm_frames.csv
 
+2026.nov  mlabru  medida do Kalman só com os eventos novos de cada célula
+                  (cluster_window(..., ff_meas_since_ts), TCell.meas); a
+                  previsão conta do instante do filtro (_forecast_offset_h)
 2026.nov  mlabru  taxa e salto de raios por célula (glm_ljump) com fonte glm;
                   campos flash_rate_now, flash_rate_recent, flash_rate_dfrdt, jump_sigma e
                   lightning_jump no JSON do frame
@@ -246,7 +249,8 @@ def filter_new_events(flst_events: list, ff_since_ts: float) -> list:
 def cluster_window(flst_events: list,
                    ff_window_minutes: float | None = None,
                    fi_window_images: int | None = None,
-                   ff_jump_since_ts: float | None = None) -> list:
+                   ff_jump_since_ts: float | None = None,
+                   ff_meas_since_ts: float | None = None) -> list:
     """
     agrupa em células os eventos mais recentes.
 
@@ -255,7 +259,9 @@ def cluster_window(flst_events: list,
       2. agrupa com DBSCAN (eps = CF_EPS_KM, min_pts = CI_MIN_PTS);
       3. resume cada cluster numa TCell (_build_cell);
       4. com ff_jump_since_ts (fonte de descargas), taxa e salto de raios de
-         cada célula (_attach_lightning_jump).
+         cada célula (_attach_lightning_jump);
+      5. com ff_meas_since_ts, a medida do Kalman: só os eventos de cada
+         cluster posteriores ao frame anterior (_attach_measurement).
 
     [fix] só a janela mais recente é usada, refletindo o estado convectivo atual.
     [fix] t_start e t_end por cluster (não globais): flash_rate e density por
@@ -267,6 +273,8 @@ def cluster_window(flst_events: list,
                              (None = CI_WINDOW_IMAGES)
     :param ff_jump_since_ts: instante do frame anterior; None = sem taxa/salto
                              de raios (fonte em imagens, o STSC)
+    :param ff_meas_since_ts: instante do frame anterior; None = a medida do
+                             Kalman é o centroide da janela (TCell.meas vazio)
     :returns: lista de TCell (ainda sem ID de track)
     """
     if not flst_events:
@@ -284,7 +292,27 @@ def cluster_window(flst_events: list,
         _attach_lightning_jump(llst_cells, llst_clusters, llst_window_events,
                                ff_window_minutes, ff_jump_since_ts)
 
+    if ff_meas_since_ts is not None:
+        _attach_measurement(llst_cells, llst_clusters, ff_meas_since_ts)
+
     return llst_cells
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _attach_measurement(flst_cells: list, flst_clusters: list, ff_since_ts: float) -> None:
+    """
+    a medida de posição de cada célula para o Kalman (trk.measurement_from_events):
+    os eventos do cluster posteriores ao frame anterior ou, com
+    trk.CI_MEAS_NEW_ONLY = 0, o cluster inteiro.
+
+    :param flst_cells: células (ALTERADAS), na ordem de flst_clusters
+    :param flst_clusters: os clusters de que vieram
+    :param ff_since_ts: instante do frame anterior
+    """
+    for l_cell, llst_cluster in zip(flst_cells, flst_clusters):
+        llst_events = (llst_cluster if not trk.CI_MEAS_NEW_ONLY else
+                       [l_event for l_event in llst_cluster if l_event.ts > ff_since_ts])
+
+        l_cell.meas = trk.measurement_from_events(llst_events)
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _attach_lightning_jump(flst_cells: list, flst_clusters: list, flst_window_events: list,
@@ -548,8 +576,10 @@ def process(fs_input_csv: str, fs_output_json: str,
     # [new] taxa e salto de raios só com fonte contínua (descargas): no STSC a
     # "taxa" mede área.  Avalia os intervalos desde o último frame aplicado
     lf_jump_since_ts = None if li_window_images > 0 else max(ff_since_ts, lf_applied_ts)
+    # [new] a medida do Kalman usa só os eventos desde o último frame aplicado
     llst_cells = cluster_window(llst_all_events, fi_window_images=li_window_images,
-                                ff_jump_since_ts=lf_jump_since_ts)
+                                ff_jump_since_ts=lf_jump_since_ts,
+                                ff_meas_since_ts=max(ff_since_ts, lf_applied_ts))
 
     if any(l_cell.lightning_jump for l_cell in llst_cells):
         M_LOG.info("salto de raios em %d células.",
@@ -706,15 +736,34 @@ def _attach_forecast_and_history(flst_cells: list, flst_tracks: list,
 
     for l_cell in flst_cells:
         if l_cell.id in fdct_kalman_states:
-            lf_offset_h = (ff_frame_ts - sst.cell_time(l_cell)) / mtn.CF_SECONDS_PER_HOUR
-            l_cell.forecast_path = mtn.extrapolate_path(fdct_kalman_states[l_cell.id],
-                                                        ff_offset_h=lf_offset_h)
+            l_kalman = fdct_kalman_states[l_cell.id]
+            l_cell.forecast_path = mtn.extrapolate_path(
+                l_kalman, ff_offset_h=_forecast_offset_h(l_kalman, l_cell, ff_frame_ts))
 
         l_track = ldct_tracks_by_id.get(l_cell.id)
 
         if l_track is not None:
             l_cell.history = [sst.cell_to_dict(l_history_cell)
                               for l_history_cell in l_track.history]
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+def _forecast_offset_h(f_kalman, f_cell: sst.TCell, ff_frame_ts: float) -> float:
+    """
+    quanto o instante do frame está à frente do estado do filtro (horas): os
+    horizontes da previsão contam do frame.
+
+    [fix] o estado está no instante da última medida (TKalmanTracker.t), não
+    necessariamente no da célula: com a medida dos eventos novos, ele fica
+    perto do frame; sem medida neste frame, mais atrás.
+
+    :param f_kalman: filtro do track
+    :param f_cell: célula (instante substituto se o filtro não tiver o seu)
+    :param ff_frame_ts: instante do frame (epoch UTC)
+    :returns: horas (>= 0 na prática)
+    """
+    lf_state_ts = f_kalman.t if f_kalman.t is not None else sst.cell_time(f_cell)
+
+    return (ff_frame_ts - lf_state_ts) / mtn.CF_SECONDS_PER_HOUR
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 def _count_window_events(flst_events: list, fi_window_images: int | None = None) -> int:

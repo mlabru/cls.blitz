@@ -69,6 +69,10 @@ class TCell:
     forecast_path: list = dataclasses.field(default_factory=list)
     # histórico curto do track (TCell anteriores), usado pelo render
     history: list = dataclasses.field(default_factory=list)
+    # [new] medida de posição para o Kalman (blt_track.measurement_from_events,
+    # preenchida por bltTracker): n, centroid, t e r_std_km dos eventos novos
+    # do cluster.  Vazio = o centroide da janela.  Não vai para o estado
+    meas: dict = dataclasses.field(default_factory=dict)
     # [new] diagnóstico da associação deste frame (blt_track.update_tracks;
     # gravado pelo blt_diag): kind ("continue", "two_point", "new", "split"),
     # dt_min, dist_km, score, size_prev, nis.  Não vai para o estado
@@ -196,6 +200,10 @@ class TStormTrack:
     active: bool = True
     # [new] ID do track de que este se dividiu ("" = nasceu sozinho)
     parent_id: str = ""
+    # [new] o Kalman nasceu com a velocidade dos tracks vizinhos
+    # (blt_track._neighbor_velocity_prior): a 2a célula não reinicia o filtro
+    # por dois pontos.  Persistido (a 2a célula chega na rodada seguinte)
+    velocity_prior: bool = False
     # [new] previsões emitidas e ainda não verificadas (blt_verify): dicts com
     # issue_ts, lead_min, lat, lng e a posição de emissão lat0, lng0
     forecasts: list = dataclasses.field(default_factory=list)
