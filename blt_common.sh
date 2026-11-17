@@ -11,6 +11,9 @@
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
 #
+# 2026.nov  mlabru  CLS_LIB obrigatória (passo 2): sai o symlink cls_common.sh
+#                   da raiz do repo; sem cls.env/CLS_LIB, erro explícito
+#
 # 2026.nov  mlabru  cls_common.sh vem de CLS_LIB (cls.env), com o symlink
 #                   ao lado do script como reserva; met_log -> cls_log
 #
@@ -48,7 +51,13 @@
 # shellcheck shell=bash
 
 # check_log_size e cls_log (cls_common.sh, compartilhado pelos projetos cls)
-source "${CLS_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/cls_common.sh"
+# CLS_LIB (cls.env) é obrigatória: sem ela não há cls_common.sh -- falha
+# aqui, com a causa, em vez de num "command not found" mais adiante
+if [ ! -r "${CLS_LIB:-}/cls_common.sh" ]; then
+    echo "[error]: CLS_LIB='${CLS_LIB:-}' sem cls_common.sh; defina-a no cls.env (${CLS_ENV_FILE:-~/.config/cls/cls.env})" >&2
+    exit 1
+fi
+source "${CLS_LIB}/cls_common.sh"
 
 # < início comum >---------------------------------------------------------------------
 

@@ -13,6 +13,9 @@
 # sempre "source"ado, nunca executado -- não define "set -e": herda as
 # opções de shell de quem importa.
 #
+# 2026.nov  mlabru  CLS_LIB obrigatória (passo 2): sai o symlink cls_common.sh
+#                   da raiz do repo; sem cls.env/CLS_LIB, erro explícito
+#
 # 2026.nov  mlabru  - cls.env (CLS_ENV_FILE, padrão ~/.config/cls/cls.env)
 #                     carregado antes dos padrões; cls_common.sh vem de
 #                     CLS_LIB, com o symlink ao lado do script como reserva
@@ -167,7 +170,13 @@ GI_MP4_CRF=23
 # < trava do ambiente de teste >-------------------------------------------------------
 
 # cls_check_test_env (cls_common.sh, compartilhado pelos projetos cls)
-source "${CLS_LIB:-${SLM_LIB_DIR}}/cls_common.sh"
+# CLS_LIB (cls.env) é obrigatória: sem ela não há cls_common.sh -- falha
+# aqui, com a causa, em vez de num "command not found" mais adiante
+if [ ! -r "${CLS_LIB:-}/cls_common.sh" ]; then
+    echo "[error]: CLS_LIB='${CLS_LIB:-}' sem cls_common.sh; defina-a no cls.env (${CLS_ENV_FILE:-~/.config/cls/cls.env})" >&2
+    exit 1
+fi
+source "${CLS_LIB}/cls_common.sh"
 
 # com CLS_ENV=test (21.mvol/tst_env), SLM_PATH precisa estar dentro de
 # CLS_TST_ROOT.  Roda no source, antes de qualquer mkdir/log/lock
