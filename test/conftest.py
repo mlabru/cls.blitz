@@ -8,7 +8,7 @@ fixtures compartilhadas pela suite de testes.
 
 os módulos de apoio ficam em apps/work/ e são importados pelo pacote
 ("import work.blt_struct as sst"), como no 27.nowcast; o pytest.ini
-(pythonpath = apps apps/util) põe apps/ no sys.path antes de qualquer teste
+(pythonpath = apps) põe apps/ no sys.path antes de qualquer teste
 importar um deles.
 
 2026.out  mlabru  módulos slm_* movidos para apps/work/ (import work.slm_xxx)

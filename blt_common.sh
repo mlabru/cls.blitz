@@ -93,7 +93,7 @@ slm_enter_run_dir()
 
 # -------------------------------------------------------------------------------------
 # prepara o python3 dos programas: ativa o virtualenv SLM_VENV só se ele
-# existir, e põe apps/ e apps/util no PYTHONPATH (os módulos de apoio ficam
+# existir, e põe apps/ no PYTHONPATH (os módulos de apoio ficam
 # em apps/work/ e se importam como "import work.blt_struct as sst").
 #
 # uso: slm_setup_python
@@ -105,7 +105,7 @@ slm_setup_python()
         source "${SLM_VENV}/bin/activate"
     fi
 
-    export PYTHONPATH="${SLM_LIB_DIR}/apps:${SLM_LIB_DIR}/apps/util${PYTHONPATH:+:${PYTHONPATH}}"
+    export PYTHONPATH="${SLM_LIB_DIR}/apps${PYTHONPATH:+:${PYTHONPATH}}"
 
 } # slm_setup_python
 
