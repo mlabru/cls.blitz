@@ -178,7 +178,7 @@ if [ ! -r "${CLS_LIB:-}/cls_common.sh" ]; then
 fi
 source "${CLS_LIB}/cls_common.sh"
 
-# com CLS_ENV=test (21.mvol/tst_env), SLM_PATH precisa estar dentro de
+# com CLS_ENV=test (cls.tst), SLM_PATH precisa estar dentro de
 # CLS_TST_ROOT.  Roda no source, antes de qualquer mkdir/log/lock
 cls_check_test_env -b "${SLM_PATH}" "${SLM_PATH}" || exit 1
 
