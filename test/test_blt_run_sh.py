@@ -421,7 +421,7 @@ class TestMain:
         assert 0 == lproc.returncode, lproc.stderr
         assert (tmp_path / "venv_ativado").exists()
 
-# < trava MET_ENV=test >───────────────────────────────────────────────────────────────
+# < trava CLS_ENV=test >───────────────────────────────────────────────────────────────
 
 class TestGenerateMap:
     """
@@ -476,8 +476,8 @@ class TestTestEnvGuard:
 
         lproc = subprocess.run(["bash", str(lpth_proj / CS_SCRIPT)], capture_output=True,
                                text=True, cwd=tmp_path,
-                               env={**_env(tmp_path, lpth_proj), "MET_ENV": "test",
-                                    "MET_TST_ROOT": str(tmp_path / "tst")})
+                               env={**_env(tmp_path, lpth_proj), "CLS_ENV": "test",
+                                    "CLS_TST_ROOT": str(tmp_path / "tst")})
 
         assert 1 == lproc.returncode
         assert "fora de" in lproc.stderr

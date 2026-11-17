@@ -3,13 +3,16 @@
 #
 # Simple Lightning Model
 # blt_common.sh
-# funções usadas pelo blt_run.sh: o log() do SLM (por cima do met_log), o
+# funções usadas pelo blt_run.sh: o log() do SLM (por cima do cls_log), o
 # início comum (diretórios, venv) e os passos do pipeline -- mapa simples,
 # tracker, render e animação.  Só define funções: nada roda no source.
 #
 # cada passo do pipeline é uma função "orquestradora" curta (generate_map,
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
+#
+# 2026.nov  mlabru  cls_common.sh vem de CLS_LIB (cls.env), com o symlink
+#                   ao lado do script como reserva; met_log -> cls_log
 #
 # 2026.nov  mlabru  logs dos programas em SLM_LOG_* (prefixo da fonte)
 # 2026.nov  mlabru  run_slm_downloader chama SLM_DOWNLOADER (fonte SLM_SOURCE);
@@ -44,20 +47,20 @@
 #             para log()
 # shellcheck shell=bash
 
-# check_log_size e met_log (cls_common.sh, compartilhado pelos projetos met)
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cls_common.sh"
+# check_log_size e cls_log (cls_common.sh, compartilhado pelos projetos cls)
+source "${CLS_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/cls_common.sh"
 
 # < início comum >---------------------------------------------------------------------
 
 # -------------------------------------------------------------------------------------
-# logger com timestamp UTC e rotação (met_log): grava em SLM_LOG_APP,
+# logger com timestamp UTC e rotação (cls_log): grava em SLM_LOG_APP,
 # ecoando em stderr -- o nível ([info]/[warn]/[error]) vem no início de $*
 #
 # uso: log "[info]: mensagem"
 #
 log()
 {
-    met_log "${SLM_LOG_APP}" "${SLM_LOG_ERR}" "$@"
+    cls_log "${SLM_LOG_APP}" "${SLM_LOG_ERR}" "$@"
 
 } # log
 

@@ -14,7 +14,7 @@ importar um deles.
 2026.out  mlabru  módulos slm_* movidos para apps/work/ (import work.slm_xxx)
 2026.out  mlabru  isolated_env (autouse): sem SLM_*/MET_* herdados do shell
                   (um SLM_PATH exportado mudaria onde o blt_run.sh grava, e
-                  MET_ENV=test ligaria a trava do ambiente de teste); o
+                  CLS_ENV=test ligaria a trava do ambiente de teste); o
                   sys.path vem do pythonpath do pytest.ini
 """
 # < imports >──────────────────────────────────────────────────────────────────────────
@@ -35,5 +35,11 @@ def isolated_env(monkeypatch):
     for ls_var in list(os.environ):
         if ls_var.startswith(("SLM_", "MET_")):
             monkeypatch.delenv(ls_var, raising=False)
+
+# < ambiente cls >─────────────────────────────────────────────────────────────────────
+
+# a suíte não depende do cls.env de quem a roda (~/.config/cls/cls.env): os
+# scripts shell testados herdam este ambiente e não carregam nada de lá
+os.environ["CLS_ENV_FILE"] = os.devnull
 
 # < the end >──────────────────────────────────────────────────────────────────────────
