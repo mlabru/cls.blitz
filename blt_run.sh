@@ -58,7 +58,7 @@ set -euo pipefail
 LS_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # ambiente (SLM_LIB_DIR, SLM_PATH, diretórios, estado, lock, trava
-# MET_ENV=test) e funções comuns (log, passos do pipeline)
+# CLS_ENV=test) e funções comuns (log, passos do pipeline)
 source "${LS_SCRIPT_DIR}/blt_cfg.sh"
 source "${LS_SCRIPT_DIR}/blt_common.sh"
 

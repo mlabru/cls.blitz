@@ -106,7 +106,7 @@ def _project(fpth_tmp: pathlib.Path, fdct_rc: dict | None = None) -> pathlib.Pat
     (lpth_proj / "apps").mkdir(parents=True)
     (lpth_proj / "bin").mkdir()
 
-    for ls_file in (CS_SCRIPT, "blt_cfg.sh", "blt_common.sh", "cls_common.sh"):
+    for ls_file in (CS_SCRIPT, "blt_cfg.sh", "blt_common.sh"):
         shutil.copy(MPTH_ROOT / ls_file, lpth_proj / ls_file)
 
     for ls_name in CLST_APPS + CLST_APPS_GLM[:1]:
@@ -421,7 +421,7 @@ class TestMain:
         assert 0 == lproc.returncode, lproc.stderr
         assert (tmp_path / "venv_ativado").exists()
 
-# < trava MET_ENV=test >───────────────────────────────────────────────────────────────
+# < trava CLS_ENV=test >───────────────────────────────────────────────────────────────
 
 class TestGenerateMap:
     """
@@ -476,8 +476,8 @@ class TestTestEnvGuard:
 
         lproc = subprocess.run(["bash", str(lpth_proj / CS_SCRIPT)], capture_output=True,
                                text=True, cwd=tmp_path,
-                               env={**_env(tmp_path, lpth_proj), "MET_ENV": "test",
-                                    "MET_TST_ROOT": str(tmp_path / "tst")})
+                               env={**_env(tmp_path, lpth_proj), "CLS_ENV": "test",
+                                    "CLS_TST_ROOT": str(tmp_path / "tst")})
 
         assert 1 == lproc.returncode
         assert "fora de" in lproc.stderr

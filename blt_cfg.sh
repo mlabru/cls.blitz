@@ -13,6 +13,15 @@
 # sempre "source"ado, nunca executado -- não define "set -e": herda as
 # opções de shell de quem importa.
 #
+# 2026.nov  mlabru  CLS_LIB obrigatória (passo 2): sai o symlink cls_common.sh
+#                   da raiz do repo; sem cls.env/CLS_LIB, erro explícito
+#
+# 2026.nov  mlabru  - cls.env (CLS_ENV_FILE, padrão ~/.config/cls/cls.env)
+#                     carregado antes dos padrões; cls_common.sh vem de
+#                     CLS_LIB, com o symlink ao lado do script como reserva
+#                   - prefixo met -> cls (cls_log, cls_check_test_env,
+#                     CLS_ENV, CLS_TST_ROOT)
+#
 # 2026.nov  mlabru  data/ e logs/ únicos para as duas fontes: SLM_TAG (slm/glm)
 #                   prefixa todo arquivo de dados, estado, produto e log; os
 #                   frames temporários ficam em temp/<tag>/ (eram data_glm/ e
@@ -30,7 +39,7 @@
 #                     SLM_ERR_PNG, que ninguém usava
 #                   - SLM_LIB_DIR (código) e SLM_VENV (padrão ~/.venv),
 #                     como NWC_LIB_DIR/NWC_VENV do 27.nowcast
-#                   - trava do ambiente de teste via met_check_test_env
+#                   - trava do ambiente de teste via cls_check_test_env
 #                     (cls_common.sh, symlink), comum aos outros projetos
 #                   - os logs do próprio shell passam a ser definidos pelo
 #                     script (blt_run.sh), como nas irmãs
@@ -43,6 +52,13 @@
 
 # código (apps/*.py) -- o diretório deste arquivo
 SLM_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ambiente da instalação (cls.env: CLS_LIB e sobreposições), carregado
+# antes dos padrões abaixo; "set -a" exporta para os programas Python.
+# Precedência: ambiente do processo > cls.env > padrões deste arquivo (ver
+# cls.common/etc/cls.env.example)
+CLS_ENV_FILE="${CLS_ENV_FILE:-${HOME:-}/.config/cls/cls.env}"
+if [ -r "${CLS_ENV_FILE}" ]; then set -a; source "${CLS_ENV_FILE}"; set +a; fi
 
 # raiz de execução: data/ e logs/.  Pode ser sobreposta pelo ambiente (deploy
 # em outra máquina, execução isolada de teste).  ${USER} pode não estar
@@ -153,11 +169,17 @@ GI_MP4_CRF=23
 
 # < trava do ambiente de teste >-------------------------------------------------------
 
-# met_check_test_env (cls_common.sh, compartilhado pelos projetos met)
-source "${SLM_LIB_DIR}/cls_common.sh"
+# cls_check_test_env (cls_common.sh, compartilhado pelos projetos cls)
+# CLS_LIB (cls.env) é obrigatória: sem ela não há cls_common.sh -- falha
+# aqui, com a causa, em vez de num "command not found" mais adiante
+if [ ! -r "${CLS_LIB:-}/cls_common.sh" ]; then
+    echo "[error]: CLS_LIB='${CLS_LIB:-}' sem cls_common.sh; defina-a no cls.env (${CLS_ENV_FILE:-~/.config/cls/cls.env})" >&2
+    exit 1
+fi
+source "${CLS_LIB}/cls_common.sh"
 
-# com MET_ENV=test (21.mvol/tst_env), SLM_PATH precisa estar dentro de
-# MET_TST_ROOT.  Roda no source, antes de qualquer mkdir/log/lock
-met_check_test_env -b "${SLM_PATH}" "${SLM_PATH}" || exit 1
+# com CLS_ENV=test (cls.test), SLM_PATH precisa estar dentro de
+# CLS_TST_ROOT.  Roda no source, antes de qualquer mkdir/log/lock
+cls_check_test_env -b "${SLM_PATH}" "${SLM_PATH}" || exit 1
 
 # < the end >--------------------------------------------------------------------------

@@ -3,13 +3,19 @@
 #
 # Simple Lightning Model
 # blt_common.sh
-# funções usadas pelo blt_run.sh: o log() do SLM (por cima do met_log), o
+# funções usadas pelo blt_run.sh: o log() do SLM (por cima do cls_log), o
 # início comum (diretórios, venv) e os passos do pipeline -- mapa simples,
 # tracker, render e animação.  Só define funções: nada roda no source.
 #
 # cada passo do pipeline é uma função "orquestradora" curta (generate_map,
 # track_new_frame, render_frame) que chama funções de um passo só; os
 # programas Python são chamados sempre pelas funções run_slm_*.
+#
+# 2026.nov  mlabru  CLS_LIB obrigatória (passo 2): sai o symlink cls_common.sh
+#                   da raiz do repo; sem cls.env/CLS_LIB, erro explícito
+#
+# 2026.nov  mlabru  cls_common.sh vem de CLS_LIB (cls.env), com o symlink
+#                   ao lado do script como reserva; met_log -> cls_log
 #
 # 2026.nov  mlabru  logs dos programas em SLM_LOG_* (prefixo da fonte)
 # 2026.nov  mlabru  run_slm_downloader chama SLM_DOWNLOADER (fonte SLM_SOURCE);
@@ -44,20 +50,26 @@
 #             para log()
 # shellcheck shell=bash
 
-# check_log_size e met_log (cls_common.sh, compartilhado pelos projetos met)
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cls_common.sh"
+# check_log_size e cls_log (cls_common.sh, compartilhado pelos projetos cls)
+# CLS_LIB (cls.env) é obrigatória: sem ela não há cls_common.sh -- falha
+# aqui, com a causa, em vez de num "command not found" mais adiante
+if [ ! -r "${CLS_LIB:-}/cls_common.sh" ]; then
+    echo "[error]: CLS_LIB='${CLS_LIB:-}' sem cls_common.sh; defina-a no cls.env (${CLS_ENV_FILE:-~/.config/cls/cls.env})" >&2
+    exit 1
+fi
+source "${CLS_LIB}/cls_common.sh"
 
 # < início comum >---------------------------------------------------------------------
 
 # -------------------------------------------------------------------------------------
-# logger com timestamp UTC e rotação (met_log): grava em SLM_LOG_APP,
+# logger com timestamp UTC e rotação (cls_log): grava em SLM_LOG_APP,
 # ecoando em stderr -- o nível ([info]/[warn]/[error]) vem no início de $*
 #
 # uso: log "[info]: mensagem"
 #
 log()
 {
-    met_log "${SLM_LOG_APP}" "${SLM_LOG_ERR}" "$@"
+    cls_log "${SLM_LOG_APP}" "${SLM_LOG_ERR}" "$@"
 
 } # log
 
@@ -81,7 +93,7 @@ slm_enter_run_dir()
 
 # -------------------------------------------------------------------------------------
 # prepara o python3 dos programas: ativa o virtualenv SLM_VENV só se ele
-# existir, e põe apps/ e apps/util no PYTHONPATH (os módulos de apoio ficam
+# existir, e põe apps/ no PYTHONPATH (os módulos de apoio ficam
 # em apps/work/ e se importam como "import work.blt_struct as sst").
 #
 # uso: slm_setup_python
@@ -93,7 +105,7 @@ slm_setup_python()
         source "${SLM_VENV}/bin/activate"
     fi
 
-    export PYTHONPATH="${SLM_LIB_DIR}/apps:${SLM_LIB_DIR}/apps/util${PYTHONPATH:+:${PYTHONPATH}}"
+    export PYTHONPATH="${SLM_LIB_DIR}/apps${PYTHONPATH:+:${PYTHONPATH}}"
 
 } # slm_setup_python
 
